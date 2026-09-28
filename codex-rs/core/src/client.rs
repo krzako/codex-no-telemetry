@@ -169,6 +169,7 @@ const X_CODEX_WS_STREAM_REQUEST_START_MS_CLIENT_METADATA_KEY: &str =
 const WS_REQUEST_HEADER_RESPONSES_LITE_CLIENT_METADATA_KEY: &str =
     "ws_request_header_x_openai_internal_codex_responses_lite";
 const RESPONSES_WEBSOCKETS_V2_BETA_HEADER_VALUE: &str = "responses_websockets=2026-02-06";
+const DSH_GATEWAY_PROVIDER_NAME: &str = "DSH model gateway";
 const X_OPENAI_INTERNAL_CODEX_RESPONSES_LITE_HEADER: &str =
     "x-openai-internal-codex-responses-lite";
 const REALTIME_CALLS_ENDPOINT: &str = "/realtime/calls";
@@ -1097,7 +1098,8 @@ impl ModelClient {
     }
 
     fn responses_headers(&self, auth: Option<&CodexAuth>, model: &str) -> ApiHeaderMap {
-        self.codex_responses_headers
+        let mut headers = self
+            .codex_responses_headers
             .as_ref()
             .filter(|config| {
                 config.model == model
@@ -1105,7 +1107,15 @@ impl ModelClient {
                     && self.state.provider.info().supports_codex_backend_routes()
             })
             .map(|config| config.headers.clone())
-            .unwrap_or_default()
+            .unwrap_or_default();
+        if self.state.provider.info().name == DSH_GATEWAY_PROVIDER_NAME {
+            let attempt_id = Uuid::new_v4().to_string();
+            headers.insert(
+                "x-dsh-model-attempt-id",
+                HeaderValue::from_str(&attempt_id).expect("UUID is a valid HTTP header value"),
+            );
+        }
+        headers
     }
 
     fn uses_codex_backend(&self, auth: Option<&CodexAuth>) -> bool {
