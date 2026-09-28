@@ -292,7 +292,7 @@ fn has_permission_override(
         })
 }
 
-fn validate_dynamic_tools(tools: &[DynamicToolSpec]) -> Result<(), String> {
+pub(super) fn validate_dynamic_tools(tools: &[DynamicToolSpec]) -> Result<(), String> {
     const DYNAMIC_TOOL_NAME_MAX_LEN: usize = 128;
     const DYNAMIC_TOOL_NAMESPACE_MAX_LEN: usize = 64;
     const DYNAMIC_TOOL_NAMESPACE_DESCRIPTION_MAX_LEN: usize = 1024;

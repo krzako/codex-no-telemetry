@@ -525,6 +525,9 @@ impl TurnRequestProcessor {
         app_server_client_name: Option<String>,
         app_server_client_version: Option<String>,
     ) -> Result<TurnStartResponse, JSONRPCErrorError> {
+        if let Some(tools) = params.dynamic_tools.as_ref() {
+            super::thread_processor::validate_dynamic_tools(tools).map_err(invalid_request)?;
+        }
         let (thread_id, thread) =
             self.load_thread(&params.thread_id)
                 .await
@@ -654,6 +657,7 @@ impl TurnRequestProcessor {
                     .on_start(TurnStartOptions {
                         turn_trigger: params.turn_trigger,
                         final_output_json_schema: params.output_schema,
+                        dynamic_tools: params.dynamic_tools,
                         service_tier: params.service_tier_for_turn,
                         cyber_access_program: params.cyber_access_program.map(Into::into),
                         ..Default::default()

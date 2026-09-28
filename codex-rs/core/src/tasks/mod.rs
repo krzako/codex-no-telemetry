@@ -497,6 +497,7 @@ impl Session {
                 sub_id,
                 NewTurnContextOptions {
                     final_output_json_schema: start_options.final_output_json_schema,
+                    dynamic_tools: start_options.dynamic_tools,
                     cyber_access_program: start_options.cyber_access_program,
                 },
             )

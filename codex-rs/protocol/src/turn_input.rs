@@ -1,5 +1,6 @@
 //! Turn-input request and result types shared by Core's submission APIs.
 
+use crate::dynamic_tools::DynamicToolSpec;
 use crate::models::ResponseItem;
 use crate::protocol::AdditionalContextEntry;
 use crate::protocol::InterAgentCommunication;
@@ -167,6 +168,8 @@ pub struct TurnStartOptions {
     /// Structured-output schema for a new turn. When steering, Core rejects
     /// the input if the active turn uses a different schema.
     pub final_output_json_schema: Option<Value>,
+    /// Callable tools for this turn only; omission inherits the thread catalog.
+    pub dynamic_tools: Option<Vec<DynamicToolSpec>>,
     /// Service tier for a new turn, without changing the thread's preference.
     pub service_tier: Option<String>,
     /// Parent turn lineage recorded if this request starts a new turn.

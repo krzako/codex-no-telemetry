@@ -297,6 +297,7 @@ impl std::fmt::Debug for TurnEnvironment {
 #[derive(Default)]
 pub(crate) struct NewTurnContextOptions {
     pub(crate) final_output_json_schema: Option<Value>,
+    pub(crate) dynamic_tools: Option<Vec<DynamicToolSpec>>,
     pub(crate) cyber_access_program: Option<CyberAccessProgram>,
 }
 
@@ -1279,6 +1280,9 @@ impl Session {
         turn_context.realtime_active = self.conversation.running_state().await.is_some();
 
         turn_context.final_output_json_schema = options.final_output_json_schema;
+        if let Some(dynamic_tools) = options.dynamic_tools {
+            turn_context.dynamic_tools = dynamic_tools;
+        }
         if turn_context.config.model_provider_id == codex_model_provider_info::OPENAI_PROVIDER_ID {
             turn_context.cyber_access_program = options.cyber_access_program;
         }
