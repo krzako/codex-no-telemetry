@@ -4903,6 +4903,7 @@ fn turn_start_params_preserve_explicit_null_service_tier() {
         thread_id: "thread_123".to_string(),
         client_user_message_id: None,
         input: vec![],
+        dynamic_tools: None,
         turn_trigger: None,
         tool_output: None,
         responsesapi_client_metadata: None,

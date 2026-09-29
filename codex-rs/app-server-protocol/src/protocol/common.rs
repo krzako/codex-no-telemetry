@@ -1791,6 +1791,20 @@ server_request_definitions! {
         response: v2::DynamicToolCallResponse,
     },
 
+    #[experimental("dshAudit/append")]
+    /// Append a fork-owned fact to the DSH session audit and wait for its durable ACK.
+    DshAuditAppend => "dshAudit/append" {
+        params: v2::DshAuditAppendParams,
+        response: v2::DshAuditAppendResponse,
+    },
+
+    #[experimental("dshAudit/cursor")]
+    /// Read the DSH session's last durable fork-audit cursor before replay.
+    DshAuditCursor => "dshAudit/cursor" {
+        params: v2::DshAuditCursorParams,
+        response: v2::DshAuditCursorResponse,
+    },
+
     ChatgptAuthTokensRefresh => "account/chatgptAuthTokens/refresh" {
         params: v2::ChatgptAuthTokensRefreshParams,
         response: v2::ChatgptAuthTokensRefreshResponse,
@@ -2991,6 +3005,52 @@ mod tests {
         let payload = ServerRequestPayload::CurrentTimeRead(params);
         assert_eq!(request.id(), &RequestId::Integer(10));
         assert_eq!(payload.request_with_id(RequestId::Integer(10)), request);
+        Ok(())
+    }
+
+    #[test]
+    fn serialize_dsh_audit_requests_and_acknowledgments() -> Result<()> {
+        let append_params = v2::DshAuditAppendParams {
+            thread_id: "thread-123".to_string(),
+            event: json!({"version": 1, "sequence": 7, "kind": "model/request"}),
+        };
+        let append = ServerRequestPayload::DshAuditAppend(append_params.clone())
+            .request_with_id(RequestId::Integer(11));
+        assert_eq!(
+            serde_json::to_value(&append)?,
+            json!({
+                "method": "dshAudit/append",
+                "id": 11,
+                "params": {"threadId": "thread-123", "event": append_params.event}
+            }),
+        );
+        let ack = v2::DshAuditAppendResponse {
+            version: 1,
+            sequence: 7,
+            event_id: "event-7".to_string(),
+        };
+        assert_eq!(
+            serde_json::from_value::<v2::DshAuditAppendResponse>(serde_json::to_value(&ack)?)?,
+            ack,
+        );
+
+        let cursor = ServerRequestPayload::DshAuditCursor(v2::DshAuditCursorParams {
+            thread_id: "thread-123".to_string(),
+        })
+        .request_with_id(RequestId::Integer(12));
+        assert_eq!(
+            serde_json::to_value(&cursor)?,
+            json!({"method": "dshAudit/cursor", "id": 12, "params": {"threadId": "thread-123"}}),
+        );
+        let empty_cursor = v2::DshAuditCursorResponse {
+            version: 1,
+            sequence: 0,
+            event_id: None,
+        };
+        assert_eq!(
+            serde_json::to_value(&empty_cursor)?,
+            json!({"version": 1, "sequence": 0, "eventId": null}),
+        );
         Ok(())
     }
 

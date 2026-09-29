@@ -1,3 +1,7 @@
+# DSH audit requests (experimental)
+
+The fork defines server-to-client `dshAudit/append` and `dshAudit/cursor` requests for a DSH-owned thread. `append` carries a versioned event as JSON; the client returns `{version, sequence, eventId}` only after its Session audit has durably committed the event. `cursor` returns `{version, sequence, eventId}` for the last committed event, with sequence `0` and null `eventId` for an empty stream. The client must reject malformed events, sequence gaps, and conflicting retries. These protocol types alone do not start an audit stream; the durable sender and receiver are separate integration work.
+
 # MCP App UI
 
 `mcpToolCall.mcpAppUi` records the invoked descriptor's `resourceUri`
