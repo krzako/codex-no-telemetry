@@ -1490,7 +1490,7 @@ impl Session {
     /// Render the request copy without changing instructions persisted or inherited by forks.
     pub(crate) async fn get_prompt_base_instructions(&self) -> BaseInstructions {
         let config = self.get_config().await;
-        let instructions = self.get_base_instructions().await;
+        let mut instructions = self.get_base_instructions().await;
         if !config.update_plan_enabled
             && config.model_catalog.is_none()
             && matches!(
@@ -1498,13 +1498,25 @@ impl Session {
                 Some(BaseInstructionsProvenance::Model { .. })
             )
         {
-            BaseInstructions {
-                text: codex_prompts::without_update_plan_instructions(&instructions.text),
-                ..instructions
-            }
-        } else {
-            instructions
+            instructions.text = codex_prompts::without_update_plan_instructions(&instructions.text);
         }
+        let delegated = self
+            .state
+            .lock()
+            .await
+            .session_configuration
+            .app_server_client_name
+            .as_deref()
+            == Some("deepseek-harness");
+        if delegated {
+            instructions.text.push_str("\n\n");
+            instructions
+                .text
+                .push_str(&crate::context::ContextualUserFragment::body(
+                    &crate::context::DelegatedToolsInstructions,
+                ));
+        }
+        instructions
     }
 
     // Merges connector IDs into the session-level explicit connector selection.
