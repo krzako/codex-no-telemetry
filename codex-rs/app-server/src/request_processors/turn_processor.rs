@@ -657,6 +657,7 @@ impl TurnRequestProcessor {
                     .on_start(TurnStartOptions {
                         turn_trigger: params.turn_trigger,
                         final_output_json_schema: params.output_schema,
+                        delegated_tools_only: params.dynamic_tools.is_some(),
                         dynamic_tools: params.dynamic_tools,
                         service_tier: params.service_tier_for_turn,
                         cyber_access_program: params.cyber_access_program.map(Into::into),

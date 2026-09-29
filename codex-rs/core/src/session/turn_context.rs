@@ -298,6 +298,7 @@ impl std::fmt::Debug for TurnEnvironment {
 pub(crate) struct NewTurnContextOptions {
     pub(crate) final_output_json_schema: Option<Value>,
     pub(crate) dynamic_tools: Option<Vec<DynamicToolSpec>>,
+    pub(crate) delegated_tools_only: bool,
     pub(crate) cyber_access_program: Option<CyberAccessProgram>,
 }
 
@@ -352,6 +353,7 @@ pub struct TurnContext {
     pub(crate) unified_exec_shell_mode: UnifiedExecShellMode,
     pub(crate) final_output_json_schema: Option<Value>,
     pub(crate) dynamic_tools: Vec<DynamicToolSpec>,
+    pub(crate) delegated_tools_only: bool,
     pub(crate) turn_metadata_state: Arc<TurnMetadataState>,
     pub(crate) extension_data: Arc<codex_extension_api::ExtensionData>,
     pub(crate) turn_timing_state: Arc<TurnTimingState>,
@@ -717,6 +719,7 @@ impl TurnContext {
             unified_exec_shell_mode: self.unified_exec_shell_mode.clone(),
             final_output_json_schema: self.final_output_json_schema.clone(),
             dynamic_tools: self.dynamic_tools.clone(),
+            delegated_tools_only: self.delegated_tools_only,
             turn_metadata_state: self.turn_metadata_state.clone(),
             extension_data: Arc::clone(&self.extension_data),
             turn_timing_state: Arc::clone(&self.turn_timing_state),
@@ -1036,6 +1039,10 @@ impl Session {
             unified_exec_shell_mode,
             final_output_json_schema: None,
             dynamic_tools: session_configuration.dynamic_tools.clone(),
+            // The DSH host owns tools for the entire persisted thread, including
+            // recovery turns where a per-turn catalog may not be supplied again.
+            delegated_tools_only: session_configuration.app_server_client_name.as_deref()
+                == Some("deepseek-harness"),
             turn_metadata_state,
             extension_data,
             turn_timing_state: Arc::new(TurnTimingState::default()),
@@ -1283,6 +1290,7 @@ impl Session {
         if let Some(dynamic_tools) = options.dynamic_tools {
             turn_context.dynamic_tools = dynamic_tools;
         }
+        turn_context.delegated_tools_only |= options.delegated_tools_only;
         if turn_context.config.model_provider_id == codex_model_provider_info::OPENAI_PROVIDER_ID {
             turn_context.cyber_access_program = options.cyber_access_program;
         }

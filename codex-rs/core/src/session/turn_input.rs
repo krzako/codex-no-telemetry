@@ -132,6 +132,7 @@ impl PreparedTurnInputSettings {
             turn_trigger,
             final_output_json_schema,
             dynamic_tools,
+            delegated_tools_only,
             service_tier,
             parent_turn_id,
             root_turn_id,
@@ -149,6 +150,7 @@ impl PreparedTurnInputSettings {
         let options = NewTurnContextOptions {
             final_output_json_schema,
             dynamic_tools,
+            delegated_tools_only,
             cyber_access_program,
         };
         let turn_context = match kind {

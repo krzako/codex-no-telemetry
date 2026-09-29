@@ -128,6 +128,17 @@ pub(crate) fn build_tool_router(
     step_store: &ExtensionData,
     tool_suggest_candidates: Option<&crate::tools::router::ToolSuggestCandidates>,
 ) -> CodexResult<ToolRouter> {
+    if turn_context.delegated_tools_only {
+        let mut registry = ToolRegistry::with_allowed_tools(session.allowed_tools.clone());
+        append_dynamic_tool_runtimes(&turn_context.dynamic_tools, &mut registry);
+        return finalize_tool_router(
+            turn_context,
+            model_info,
+            registry,
+            Vec::new(),
+            &session.services.tool_search_handler_cache,
+        );
+    }
     let default_agent_type_description =
         crate::agent::role::spawn_tool_spec::build(&std::collections::BTreeMap::new());
     let wait_for_environment_tool_config = session
@@ -621,7 +632,9 @@ fn hosted_model_tool_specs(
 }
 
 pub(crate) fn search_tool_enabled(turn_context: &TurnContext, model_info: &ModelInfo) -> bool {
-    model_info.supports_search_tool && namespace_tools_enabled(turn_context)
+    !turn_context.delegated_tools_only
+        && model_info.supports_search_tool
+        && namespace_tools_enabled(turn_context)
 }
 
 pub(crate) fn tool_suggest_enabled(turn_context: &TurnContext) -> bool {

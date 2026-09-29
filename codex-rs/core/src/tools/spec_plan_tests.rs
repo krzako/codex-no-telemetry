@@ -630,6 +630,51 @@ async fn internal_guardian_sessions_exclude_optional_core_tools() {
 }
 
 #[tokio::test]
+async fn delegated_turn_registers_only_host_supplied_tools() {
+    for dynamic_tools in [
+        vec![dynamic_tool(
+            None,
+            "dsh_lookup",
+            /*defer_loading*/ false,
+        )],
+        Vec::new(),
+    ] {
+        let (session, mut turn) = make_session_and_context().await;
+        turn.delegated_tools_only = true;
+        turn.dynamic_tools = dynamic_tools;
+        set_feature(&mut turn, Feature::ShellTool, /*enabled*/ true);
+        set_feature(&mut turn, Feature::ViewImage, /*enabled*/ true);
+        set_feature(&mut turn, Feature::CodeMode, /*enabled*/ true);
+        Arc::make_mut(&mut turn.config).update_plan_enabled = true;
+        turn.multi_agent_version = MultiAgentVersion::V2;
+        let turn = Arc::new(turn);
+        let step_context = StepContext::for_test(Arc::clone(&turn));
+        let router = super::build_tool_router(
+            &session,
+            step_context.turn.as_ref(),
+            &step_context.settings.model_info,
+            &step_context.environments,
+            &step_context.mcp,
+            /*apps_enabled*/ true,
+            &turn.extension_data,
+            /*tool_suggest_candidates*/ None,
+        )
+        .expect("build delegated tool router");
+        let plan = ToolPlanProbe::from_router(router);
+        let expected = if turn.dynamic_tools.is_empty() {
+            Vec::new()
+        } else {
+            vec!["dsh_lookup".to_string()]
+        };
+        assert_eq!(plan.visible_names, expected);
+        assert_eq!(plan.registered_names, expected);
+        assert_eq!(plan.tool_mode, ToolMode::Direct);
+        assert!(!plan.requires_code_mode_worker);
+        assert!(!plan.can_manage_children);
+    }
+}
+
+#[tokio::test]
 async fn internal_guardian_sessions_respect_managed_shell_restrictions() {
     for (disabled_feature, shell_type) in [
         (Some(Feature::ShellTool), ConfigShellToolType::UnifiedExec),

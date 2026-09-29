@@ -170,6 +170,8 @@ pub struct TurnStartOptions {
     pub final_output_json_schema: Option<Value>,
     /// Callable tools for this turn only; omission inherits the thread catalog.
     pub dynamic_tools: Option<Vec<DynamicToolSpec>>,
+    /// An external host owns the whole tool surface for this turn.
+    pub delegated_tools_only: bool,
     /// Service tier for a new turn, without changing the thread's preference.
     pub service_tier: Option<String>,
     /// Parent turn lineage recorded if this request starts a new turn.
