@@ -1139,6 +1139,7 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
                 ClientRequest::TurnStart {
                     request_id: request_ids.next(),
                     params: TurnStartParams {
+                        dsh_audit: None,
                         dynamic_tools: None,
                         disabled_plugin_ids: None,
                         thread_id: primary_thread_id_for_span.clone(),
@@ -2044,6 +2045,16 @@ async fn handle_server_request(
                     "dynamic tool calls are not supported in exec mode for thread `{}`",
                     params.thread_id
                 ),
+            )
+            .await
+        }
+        ServerRequest::DshAuditAppend { request_id, .. }
+        | ServerRequest::DshAuditCursor { request_id, .. } => {
+            reject_server_request(
+                client,
+                request_id,
+                &method,
+                "DSH audit requests are not supported in exec mode".to_string(),
             )
             .await
         }

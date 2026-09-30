@@ -24,6 +24,12 @@ pub(super) fn server_request_thread_id(request: &ServerRequest) -> Option<Thread
         ServerRequest::DynamicToolCall { params, .. } => {
             ThreadId::from_string(&params.thread_id).ok()
         }
+        ServerRequest::DshAuditAppend { params, .. } => {
+            ThreadId::from_string(&params.thread_id).ok()
+        }
+        ServerRequest::DshAuditCursor { params, .. } => {
+            ThreadId::from_string(&params.thread_id).ok()
+        }
         ServerRequest::CurrentTimeRead { params, .. } => {
             ThreadId::from_string(&params.thread_id).ok()
         }

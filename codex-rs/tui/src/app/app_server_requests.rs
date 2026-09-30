@@ -175,6 +175,13 @@ impl PendingAppServerRequests {
                 None
             }
             ServerRequest::DynamicToolCall { .. } => None,
+            ServerRequest::DshAuditAppend { request_id, .. }
+            | ServerRequest::DshAuditCursor { request_id, .. } => {
+                Some(UnsupportedAppServerRequest {
+                    request_id: request_id.clone(),
+                    message: "DSH audit requests are not available in TUI.".to_string(),
+                })
+            }
             ServerRequest::ChatgptAuthTokensRefresh { .. } => None,
             ServerRequest::AttestationGenerate { request_id, .. } => {
                 Some(UnsupportedAppServerRequest {
@@ -430,7 +437,9 @@ impl PendingAppServerRequests {
                 .values()
                 .any(|pending_request_id| pending_request_id == request_id),
             ServerRequest::ChatgptAuthTokensRefresh { .. } => true,
-            ServerRequest::DynamicToolCall { .. }
+            ServerRequest::DshAuditAppend { .. }
+            | ServerRequest::DshAuditCursor { .. }
+            | ServerRequest::DynamicToolCall { .. }
             | ServerRequest::AttestationGenerate { .. }
             | ServerRequest::CurrentTimeRead { .. }
             | ServerRequest::ApplyPatchApproval { .. }

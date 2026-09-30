@@ -166,6 +166,10 @@ pub struct TurnToolOutput {
 #[ts(export_to = "v2/")]
 pub struct TurnStartParams {
     pub thread_id: String,
+    /// Required by the DSH client to establish the durable audit cursor before this turn runs.
+    #[experimental("turn/start.dshAudit")]
+    #[ts(optional = nullable)]
+    pub dsh_audit: Option<super::DshAuditTurn>,
     /// Replace the callable catalog for this turn. Omitted inherits the thread catalog;
     /// an empty list explicitly removes every dynamic tool for this turn.
     #[experimental("turn/start.dynamicTools")]

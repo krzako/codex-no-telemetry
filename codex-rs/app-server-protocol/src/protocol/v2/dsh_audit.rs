@@ -41,3 +41,12 @@ pub struct DshAuditCursorResponse {
     pub sequence: u64,
     pub event_id: Option<String>,
 }
+
+/// The DSH Session and turn that own a `turn/start` audit preflight.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct DshAuditTurn {
+    pub session_id: String,
+    pub turn: u64,
+}

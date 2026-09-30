@@ -1,6 +1,8 @@
 # DSH audit requests (experimental)
 
-The fork defines server-to-client `dshAudit/append` and `dshAudit/cursor` requests for a DSH-owned thread. `append` carries a versioned event as JSON; the client returns `{version, sequence, eventId}` only after its Session audit has durably committed the event. `cursor` returns `{version, sequence, eventId}` for the last committed event, with sequence `0` and null `eventId` for an empty stream. The client must reject malformed events, sequence gaps, and conflicting retries. These protocol types alone do not start an audit stream; the durable sender and receiver are separate integration work.
+The fork sends `dshAudit/cursor` and `dshAudit/append` requests to DSH for a DSH-owned thread. `append` carries a versioned event as JSON; the client returns `{version, sequence, eventId}` only after its Session audit has durably committed the event. `cursor` returns the last committed sequence and event ID, with sequence `0` and null `eventId` for an empty stream. The client rejects malformed events, sequence gaps, and conflicting retries.
+
+The `deepseek-harness` client supplies `turn/start.dshAudit` with its Session ID and turn. Before submitting that turn to Codex, the app-server reads its per-thread spool under `CODEX_HOME/dsh-audit-v1`, checks the DSH cursor, replays pending events, durably records a `context/config` fact, and waits for its ACK. A missing client, mismatched cursor or ACK, or spool failure rejects `turn/start`; the model loop does not run. A lost ACK after DSH committed an event is reconciled from the next cursor without appending it twice. Full model requests, compaction facts, and checkpoints are separate producers that must use this required channel before they execute or return results.
 
 # MCP App UI
 

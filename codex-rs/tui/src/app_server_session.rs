@@ -1362,6 +1362,7 @@ impl AppServerSession {
             .request_typed(ClientRequest::TurnStart {
                 request_id,
                 params: TurnStartParams {
+                    dsh_audit: None,
                     dynamic_tools: None,
                     disabled_plugin_ids: None,
                     thread_id: thread_id.to_string(),

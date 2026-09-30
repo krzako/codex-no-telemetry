@@ -16,6 +16,7 @@ use codex_protocol::protocol::TurnSettingsUpdate;
 use codex_protocol::protocol::TurnSettingsUpdateOutcome;
 use codex_skills::system_cache_root_dir;
 
+use crate::dsh_audit::DshAuditManager;
 use crate::image_url::REMOTE_IMAGE_URL_ERROR;
 use crate::image_url::is_remote_image_url;
 
@@ -79,6 +80,7 @@ fn validate_response_item_image_urls(items: &[ResponseItem]) -> Result<(), JSONR
 
 #[derive(Clone)]
 pub(crate) struct TurnRequestProcessor {
+    dsh_audit: Arc<DshAuditManager>,
     agent_runner: AgentRunner,
     auth_manager: Arc<AuthManager>,
     thread_manager: Arc<ThreadManager>,
@@ -155,7 +157,12 @@ impl TurnRequestProcessor {
         turn_cost_worker: Option<crate::turn_cost_worker::TurnCostWorkerHandle>,
     ) -> Self {
         let agent_runner = AgentRunner::new(Arc::downgrade(&thread_manager));
+        let dsh_audit = Arc::new(DshAuditManager::new(
+            config.codex_home.to_path_buf().join("dsh-audit-v1"),
+            Arc::clone(&outgoing),
+        ));
         Self {
+            dsh_audit,
             agent_runner,
             auth_manager,
             thread_manager,
@@ -528,6 +535,14 @@ impl TurnRequestProcessor {
         if let Some(tools) = params.dynamic_tools.as_ref() {
             super::thread_processor::validate_dynamic_tools(tools).map_err(invalid_request)?;
         }
+        let is_dsh_client = app_server_client_name.as_deref() == Some("deepseek-harness");
+        let audit_turn = params.dsh_audit.clone();
+        let audit_config = serde_json::json!({
+            "sessionId": audit_turn.as_ref().map(|turn| turn.session_id.as_str()),
+            "requestedModel": params.model,
+            "reasoningEffort": params.effort,
+            "dynamicTools": params.dynamic_tools,
+        });
         let (thread_id, thread) =
             self.load_thread(&params.thread_id)
                 .await
@@ -649,6 +664,24 @@ impl TurnRequestProcessor {
                 },
             )
             .await?;
+
+        if is_dsh_client {
+            let audit_turn =
+                audit_turn.ok_or_else(|| invalid_request("DSH turn requires dshAudit"))?;
+            if audit_turn.session_id.is_empty() || audit_turn.turn == 0 {
+                return Err(invalid_request(
+                    "DSH audit Session and turn must be nonempty",
+                ));
+            }
+            self.dsh_audit
+                .before_turn(&request_id, thread_id, &audit_turn, audit_config)
+                .await
+                .map_err(|err| internal_error(format!("DSH audit preflight failed: {err}")))?;
+        } else if audit_turn.is_some() {
+            return Err(invalid_request(
+                "dshAudit requires the DSH app-server client",
+            ));
+        }
 
         let submission = thread
             .start_or_steer_turn(

@@ -3491,6 +3491,8 @@ async fn turn_start_explicit_local_environment_updates_legacy_cwd_between_turns(
                 collaboration_mode: None,
                 multi_agent_mode: None,
                 cyber_access_program: None,
+                dynamic_tools: None,
+                dsh_audit: None,
             },
         })
         .await?;
@@ -3539,6 +3541,8 @@ async fn turn_start_explicit_local_environment_updates_legacy_cwd_between_turns(
                 collaboration_mode: None,
                 multi_agent_mode: None,
                 cyber_access_program: None,
+                dynamic_tools: None,
+                dsh_audit: None,
             },
         })
         .await?;

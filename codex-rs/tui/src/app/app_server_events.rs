@@ -564,7 +564,9 @@ impl App {
         }
         let unsupported_request = matches!(
             &request,
-            ServerRequest::DynamicToolCall { .. }
+            ServerRequest::DshAuditAppend { .. }
+                | ServerRequest::DshAuditCursor { .. }
+                | ServerRequest::DynamicToolCall { .. }
                 | ServerRequest::AttestationGenerate { .. }
                 | ServerRequest::CurrentTimeRead { .. }
                 | ServerRequest::ApplyPatchApproval { .. }

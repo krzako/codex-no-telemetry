@@ -4883,6 +4883,28 @@ fn thread_recency_sort_key_serializes_as_snake_case() {
 }
 
 #[test]
+fn turn_start_params_round_trip_dsh_audit_owner() {
+    let params: TurnStartParams = serde_json::from_value(json!({
+        "threadId": "thread_123",
+        "input": [],
+        "dshAudit": { "sessionId": "session-1", "turn": 3 }
+    }))
+    .expect("DSH audit owner should deserialize");
+    assert_eq!(
+        params.dsh_audit,
+        Some(DshAuditTurn {
+            session_id: "session-1".to_string(),
+            turn: 3,
+        })
+    );
+    let serialized = serde_json::to_value(&params).expect("turn should serialize");
+    assert_eq!(
+        serialized.get("dshAudit"),
+        Some(&json!({ "sessionId": "session-1", "turn": 3 }))
+    );
+}
+
+#[test]
 fn turn_start_params_preserve_explicit_null_service_tier() {
     let params: TurnStartParams = serde_json::from_value(json!({
         "threadId": "thread_123",
@@ -4904,6 +4926,7 @@ fn turn_start_params_preserve_explicit_null_service_tier() {
         client_user_message_id: None,
         input: vec![],
         dynamic_tools: None,
+        dsh_audit: None,
         turn_trigger: None,
         tool_output: None,
         responsesapi_client_metadata: None,

@@ -129,6 +129,24 @@
       ],
       "type": "string"
     },
+    "DshAuditTurn": {
+      "description": "The DSH Session and turn that own a `turn/start` audit preflight.",
+      "properties": {
+        "sessionId": {
+          "type": "string"
+        },
+        "turn": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "sessionId",
+        "turn"
+      ],
+      "type": "object"
+    },
     "DynamicToolNamespaceTool": {
       "oneOf": [
         {

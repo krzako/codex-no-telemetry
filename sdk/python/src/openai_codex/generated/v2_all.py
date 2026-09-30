@@ -1184,6 +1184,14 @@ class DesktopOnboardingEntrypoint(RootModel[Literal["life_sciences"]]):
     root: Literal["life_sciences"]
 
 
+class DshAuditTurn(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    session_id: Annotated[str, Field(alias="sessionId")]
+    turn: Annotated[int, Field(ge=0)]
+
+
 class InputTextDynamicToolCallOutputContentItem(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
