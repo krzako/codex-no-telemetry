@@ -1097,7 +1097,7 @@ impl ModelClient {
         }
     }
 
-    fn responses_headers(&self, auth: Option<&CodexAuth>, model: &str) -> ApiHeaderMap {
+    fn responses_headers(&self, auth: Option<&CodexAuth>, model: &str) -> Result<ApiHeaderMap> {
         let mut headers = self
             .codex_responses_headers
             .as_ref()
@@ -1110,12 +1110,11 @@ impl ModelClient {
             .unwrap_or_default();
         if self.state.provider.info().name == DSH_GATEWAY_PROVIDER_NAME {
             let attempt_id = Uuid::new_v4().to_string();
-            headers.insert(
-                "x-dsh-model-attempt-id",
-                HeaderValue::from_str(&attempt_id).expect("UUID is a valid HTTP header value"),
-            );
+            let attempt_header =
+                HeaderValue::from_str(&attempt_id).map_err(std::io::Error::other)?;
+            headers.insert("x-dsh-model-attempt-id", attempt_header);
         }
-        headers
+        Ok(headers)
     }
 
     fn uses_codex_backend(&self, auth: Option<&CodexAuth>) -> bool {
@@ -1490,7 +1489,8 @@ impl ModelClientSession {
         );
         let responses_headers = self
             .client
-            .responses_headers(client_setup.auth.as_ref(), &model_info.slug);
+            .responses_headers(client_setup.auth.as_ref(), &model_info.slug)
+            .map_err(|err| ApiError::Stream(format!("failed to build response headers: {err}")))?;
         self.websocket_connection(WebsocketConnectParams {
             session_telemetry,
             api_provider: client_setup.api_provider,
@@ -1641,7 +1641,7 @@ impl ModelClientSession {
                 .await?;
             let responses_headers = self
                 .client
-                .responses_headers(client_setup.auth.as_ref(), &model_info.slug);
+                .responses_headers(client_setup.auth.as_ref(), &model_info.slug)?;
             tracing::Span::current().record("api.path", "/responses");
             let transport = self.client.build_api_transport(
                 &client_setup.api_provider,
@@ -1823,7 +1823,7 @@ impl ModelClientSession {
                 .await?;
             let responses_headers = self
                 .client
-                .responses_headers(client_setup.auth.as_ref(), &model_info.slug);
+                .responses_headers(client_setup.auth.as_ref(), &model_info.slug)?;
             tracing::Span::current().record("api.path", "/responses");
             let request_auth_context = AuthRequestTelemetryContext::new(
                 client_setup.auth.as_ref().map(CodexAuth::auth_mode),

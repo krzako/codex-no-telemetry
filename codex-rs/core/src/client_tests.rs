@@ -1672,7 +1672,10 @@ fn thread_responses_headers_are_scoped_to_model_and_backend_auth() {
         ),
         (None, "selected-model", http::HeaderMap::new()),
     ] {
-        assert_eq!(model_client.responses_headers(auth, model), expected);
+        assert_eq!(
+            model_client.responses_headers(auth, model).unwrap(),
+            expected
+        );
     }
 
     Arc::get_mut(&mut model_client.state)
@@ -1682,7 +1685,9 @@ fn thread_responses_headers_are_scoped_to_model_and_backend_auth() {
         Some(AuthManager::from_auth_for_testing(chatgpt_auth.clone())),
     );
     assert_eq!(
-        model_client.responses_headers(Some(&chatgpt_auth), "selected-model"),
+        model_client
+            .responses_headers(Some(&chatgpt_auth), "selected-model")
+            .unwrap(),
         http::HeaderMap::new(),
     );
 }
