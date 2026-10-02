@@ -145,6 +145,7 @@ impl AuditSpool {
         Ok(())
     }
 
+    #[cfg(test)]
     fn record_context(&mut self, turn: &DshAuditTurn, config: Value) -> Result<()> {
         self.record(json!({
             "eventId": format!("dsh-turn-config-{}", turn.turn),
@@ -218,6 +219,27 @@ impl DshAuditManager {
         turn: &DshAuditTurn,
         config: Value,
     ) -> Result<()> {
+        self.append_fact(
+            request_id,
+            thread_id,
+            json!({
+                "eventId": format!("dsh-turn-config-{}", turn.turn),
+                "turn": turn.turn,
+                "kind": "context/config",
+                "config": { "kind": "inline", "value": config },
+            }),
+        )
+        .await
+    }
+
+    /// Persist one fork fact and wait for DSH to durably acknowledge it.
+    /// A retry with the same event ID must have identical content.
+    pub(crate) async fn append_fact(
+        &self,
+        request_id: &ConnectionRequestId,
+        thread_id: ThreadId,
+        fact: Value,
+    ) -> Result<()> {
         let semaphore = {
             let mut locks = self.locks.lock().await;
             Arc::clone(
@@ -255,9 +277,8 @@ impl DshAuditManager {
             }
         };
         spool.reconcile(exchange).await?;
-        let turn = turn.clone();
         tokio::task::spawn_blocking(move || {
-            spool.record_context(&turn, config)?;
+            spool.record(fact)?;
             Ok::<_, anyhow::Error>(spool)
         })
         .await??
@@ -393,6 +414,60 @@ mod tests {
                 .to_string()
                 .contains("acknowledgment conflicts")
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn arbitrary_model_facts_replay_in_order_without_duplicate_execution() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let thread_id = Uuid::now_v7().to_string();
+        let remote = Arc::new(StdMutex::new(Remote::default()));
+        let request = json!({
+            "eventId": "model-request-1",
+            "turn": 1,
+            "kind": "model/request",
+            "attemptId": "attempt-1",
+            "purpose": "inference",
+            "stage": "model-visible",
+            "apiFormat": "responses",
+            "request": { "kind": "inline", "value": { "input": ["full prompt"] } },
+        });
+        let result = json!({
+            "eventId": "model-result-1",
+            "turn": 1,
+            "kind": "model/result",
+            "attemptId": "attempt-1",
+            "purpose": "inference",
+            "stage": "codex",
+            "result": { "kind": "inline", "value": { "output": ["answer"] } },
+        });
+        let mut spool = AuditSpool::open(root.path(), &thread_id)?;
+        spool.record(request.clone())?;
+        remote.lock().expect("remote lock").lose_first_ack = true;
+        assert!(
+            spool
+                .reconcile(exchange(Arc::clone(&remote)))
+                .await
+                .is_err()
+        );
+        drop(spool);
+
+        let mut resumed = AuditSpool::open(root.path(), &thread_id)?;
+        resumed.reconcile(exchange(Arc::clone(&remote))).await?;
+        resumed.record(request.clone())?;
+        assert!(
+            resumed
+                .record(json!({ "eventId": "model-request-1", "changed": true }))
+                .is_err()
+        );
+        resumed.record(result)?;
+        resumed.reconcile(exchange(Arc::clone(&remote))).await?;
+        assert_eq!(resumed.events.len(), 2);
+        assert_eq!(resumed.events[0]["kind"], "model/request");
+        assert_eq!(resumed.events[1]["kind"], "model/result");
+        let remote = remote.lock().expect("remote lock");
+        assert_eq!(remote.sequence, 2);
+        assert_eq!(remote.appends, 2);
         Ok(())
     }
 }
