@@ -158,43 +158,6 @@ pub fn create_write_stdin_tool() -> ToolSpec {
     })
 }
 
-pub fn create_request_permissions_tool(description: String) -> ToolSpec {
-    let properties = BTreeMap::from([
-        (
-            "reason".to_string(),
-            JsonSchema::string(Some(
-                "Optional short explanation for why additional permissions are needed.".to_string(),
-            )),
-        ),
-        (
-            "environment_id".to_string(),
-            JsonSchema::string(Some(
-                "Environment id from <environment_context>. Omit to use the primary environment."
-                    .to_string(),
-            )),
-        ),
-        ("permissions".to_string(), permission_profile_schema()),
-    ]);
-
-    ToolSpec::Function(ResponsesApiTool {
-        name: "request_permissions".to_string(),
-        description,
-        strict: false,
-        defer_loading: None,
-        parameters: JsonSchema::object(
-            properties,
-            Some(vec!["permissions".to_string()]),
-            Some(false.into()),
-        ),
-        output_schema: None,
-    })
-}
-
-pub fn request_permissions_tool_description() -> String {
-    "Request additional filesystem or network permissions from the user and wait for the client to grant a subset of the requested permission profile. Use environment_id to target a specific attached environment; omit it to use the primary environment. Relative filesystem paths resolve against the selected environment cwd. Granted permissions apply automatically to later shell-like commands in the current turn, or for the rest of the session if the client approves them at session scope."
-        .to_string()
-}
-
 fn unified_exec_output_schema() -> Value {
     json!({
         "type": "object",
