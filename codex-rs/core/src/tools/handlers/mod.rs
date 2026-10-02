@@ -8,8 +8,6 @@ pub(crate) mod multi_agents_spec;
 pub(crate) mod multi_agents_v2;
 mod request_permissions;
 pub(crate) mod shell_spec;
-mod tool_search;
-pub(crate) mod tool_search_spec;
 pub(crate) mod unified_exec;
 mod wait_for_environment;
 
@@ -37,7 +35,6 @@ use codex_protocol::protocol::AskForApproval;
 pub use dynamic::DynamicToolHandler;
 pub use mcp::McpHandler;
 pub use request_permissions::RequestPermissionsHandler;
-pub(crate) use tool_search::ToolSearchHandlerCache;
 pub use unified_exec::ExecCommandHandler;
 pub(crate) use unified_exec::ExecCommandHandlerOptions;
 pub use unified_exec::WriteStdinHandler;
