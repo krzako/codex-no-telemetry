@@ -293,7 +293,6 @@ fn output_context(session: Arc<Session>, turn_context: Arc<TurnContext>) -> Hand
         step_context.turn.model_info(),
         registry,
         Vec::new(),
-        &Default::default(),
     ));
     let step_context = step_context.with_tool_router_for_test(router);
     let tracker = Arc::new(tokio::sync::Mutex::new(TurnDiffTracker::new()));

@@ -57,7 +57,6 @@ fn test_tool_router(
         step_context.turn.model_info(),
         registry,
         Vec::new(),
-        &Default::default(),
     )
 }
 

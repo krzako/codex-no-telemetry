@@ -8,9 +8,7 @@ use crate::tools::effective_tool_mode;
 use crate::tools::handlers::CodeModeExecuteHandler;
 use crate::tools::handlers::CodeModeWaitHandler;
 use crate::tools::handlers::DynamicToolHandler;
-use crate::tools::handlers::ToolSearchHandlerCache;
 use crate::tools::handlers::multi_agents_spec::MULTI_AGENT_V1_NAMESPACE;
-use crate::tools::handlers::tool_search_spec::ToolSearchSourceListing;
 use crate::tools::registry::ToolExposure;
 use crate::tools::registry::ToolRegistry;
 use crate::tools::router::ToolRouter;
@@ -44,13 +42,7 @@ pub(crate) fn build_tool_router(
 ) -> CodexResult<ToolRouter> {
     let mut registry = ToolRegistry::with_allowed_tools(session.allowed_tools.clone());
     append_dynamic_tool_runtimes(&turn_context.dynamic_tools, &mut registry);
-    finalize_tool_router(
-        turn_context,
-        model_info,
-        registry,
-        Vec::new(),
-        &session.services.tool_search_handler_cache,
-    )
+    finalize_tool_router(turn_context, model_info, registry, Vec::new())
 }
 
 #[instrument(level = "trace", skip_all)]
@@ -59,7 +51,6 @@ pub(crate) fn finalize_tool_router(
     model_info: &ModelInfo,
     mut registry: ToolRegistry,
     mut hosted_specs: Vec<ToolSpec>,
-    tool_search_handler_cache: &ToolSearchHandlerCache,
 ) -> CodexResult<ToolRouter> {
     if let Some(allowed) = &registry.allowed_tools {
         hosted_specs.retain(|spec| allowed.contains(&ToolName::plain(spec.name())));
@@ -77,43 +68,6 @@ pub(crate) fn finalize_tool_router(
             }
         }
     }
-    let tool_search_name = ToolName::plain(TOOL_SEARCH_TOOL_NAME);
-    if search_tool_enabled(turn_context, model_info)
-        && registry.entries().any(|tool| {
-            tool.runtime.tool_name() != tool_search_name
-                && tool.exposure.is_deferred()
-                && tool.runtime.search_info().is_some()
-        })
-    {
-        if registry.remove(&tool_search_name).is_some() {
-            registry.record_collision(tool_search_name.clone());
-        }
-        // Special model tools own the namespace matching their wire identity, so
-        // regular namespace tools cannot advertise that same model-visible surface.
-        let conflicting_tool_names = registry
-            .entries()
-            .filter_map(|tool| {
-                let owned_spec;
-                let spec = if let Some(spec) = tool.runtime.immutable_spec() {
-                    spec.as_ref()
-                } else {
-                    owned_spec = tool.runtime.spec();
-                    &owned_spec
-                };
-                let ToolSpec::Namespace(namespace) = spec else {
-                    return None;
-                };
-                (namespace.name == tool_search_name.name).then(|| tool.runtime.tool_name())
-            })
-            .collect::<Vec<_>>();
-        for tool_name in conflicting_tool_names {
-            if registry.remove(&tool_name).is_some() {
-                registry.record_collision(tool_name);
-            }
-        }
-        append_tool_search_executor(turn_context, &mut registry, tool_search_handler_cache);
-    }
-
     let code_mode_tool_names =
         register_code_mode_executors(turn_context, model_info, &mut registry);
     let include_tool_namespaces_info = turn_context
@@ -619,25 +573,6 @@ pub(crate) fn append_dynamic_tool_runtimes(
             }
         }
     }
-}
-
-#[instrument(level = "trace", skip_all)]
-fn append_tool_search_executor(
-    turn_context: &TurnContext,
-    registry: &mut ToolRegistry,
-    tool_search_handler_cache: &ToolSearchHandlerCache,
-) {
-    let source_listing = if turn_context
-        .config
-        .features
-        .enabled(Feature::DeferredToolWorldState)
-    {
-        ToolSearchSourceListing::Omit
-    } else {
-        ToolSearchSourceListing::Include
-    };
-    let handler = tool_search_handler_cache.get_or_build(registry, source_listing);
-    registry.register_trusted(handler);
 }
 
 fn compare_code_mode_tools(

@@ -7,8 +7,6 @@ use crate::session::turn_context::TurnContext;
 use crate::tools::context::SharedTurnDiffTracker;
 use crate::tools::context::ToolInvocation;
 use crate::tools::context::ToolPayload;
-#[cfg(test)]
-use crate::tools::handlers::ToolSearchHandlerCache;
 use crate::tools::registry::AnyToolResult;
 use crate::tools::registry::CoreToolRuntime;
 use crate::tools::registry::ToolArgumentDiffConsumer;
@@ -99,16 +97,9 @@ impl ToolRouter {
         model_info: &ModelInfo,
         registry: ToolRegistry,
         hosted_specs: Vec<ToolSpec>,
-        tool_search_handler_cache: &ToolSearchHandlerCache,
     ) -> Self {
-        finalize_tool_router(
-            turn_context,
-            model_info,
-            registry,
-            hosted_specs,
-            tool_search_handler_cache,
-        )
-        .expect("test tool registry should not contain duplicate tools")
+        finalize_tool_router(turn_context, model_info, registry, hosted_specs)
+            .expect("test tool registry should not contain duplicate tools")
     }
 
     pub(crate) fn from_parts(

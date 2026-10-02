@@ -114,7 +114,6 @@ async fn detached_code_mode_callback_keeps_thread_id_on_dispatch_span() -> anyho
         turn.model_info(),
         registry,
         /*hosted_specs*/ Vec::new(),
-        &Default::default(),
     ));
     let step = StepContext::for_test(Arc::clone(&turn)).with_tool_router_for_test(router);
     let broker = Arc::new(CodeModeDispatchBroker::new(

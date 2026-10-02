@@ -1003,7 +1003,6 @@ fn test_tool_runtime(session: Arc<Session>, turn_context: Arc<TurnContext>) -> T
         step_context.turn.model_info(),
         registry,
         Vec::new(),
-        &Default::default(),
     ));
     let step_context = step_context.with_tool_router_for_test(router);
     let tracker = Arc::new(tokio::sync::Mutex::new(TurnDiffTracker::new()));
@@ -6230,7 +6229,6 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
             &config.code_mode,
             executed_tool_calls,
         ),
-        tool_search_handler_cache: Default::default(),
         turn_environments: Arc::clone(&turn_environments),
     };
 
@@ -8487,7 +8485,6 @@ where
             &config.code_mode,
             executed_tool_calls,
         ),
-        tool_search_handler_cache: Default::default(),
         turn_environments: Arc::clone(&turn_environments),
     };
 
@@ -12154,7 +12151,6 @@ async fn fatal_tool_error_stops_turn_and_reports_error() {
         step_context.turn.model_info(),
         registry,
         Vec::new(),
-        &Default::default(),
     );
     let item = ResponseItem::CustomToolCall {
         id: None,
