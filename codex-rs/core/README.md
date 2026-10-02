@@ -7,8 +7,10 @@ This crate implements the business logic for Codex. It is designed to be used by
 Every client advertises only dynamic tools supplied by its host. With an empty
 dynamic catalog, the model receives no tools. Native shell, patch, MCP, web,
 plugin, and code-mode tools are not registered in the active tool plan. Dynamic
-tools use direct function calls even when their input requests deferred loading;
-the host owns discovery and may use names formerly reserved by native tools.
+tools use direct function calls when supplied for the current turn. Deferred
+dynamic tools are omitted from both the model request and dispatcher until the
+host supplies them again as direct tools. The host owns discovery and may use
+names formerly reserved by native tools.
 The shared dispatcher still routes admitted dynamic calls to the host callback.
 
 ## Wine-exec integration tests

@@ -1320,6 +1320,9 @@ fn append_dynamic_tool_runtimes(dynamic_tools: &[DynamicToolSpec], registry: &mu
     for spec in dynamic_tools {
         match spec {
             DynamicToolSpec::Function(tool) => {
+                if tool.defer_loading {
+                    continue;
+                }
                 let Some(handler) = DynamicToolHandler::new(tool) else {
                     tracing::error!(
                         "Failed to convert dynamic tool {:?} to OpenAI tool",
@@ -1327,11 +1330,14 @@ fn append_dynamic_tool_runtimes(dynamic_tools: &[DynamicToolSpec], registry: &mu
                     );
                     continue;
                 };
-                registry.register_external_with_exposure(Arc::new(handler), ToolExposure::Direct);
+                registry.register_external(Arc::new(handler));
             }
             DynamicToolSpec::Namespace(namespace) => {
                 for tool in &namespace.tools {
                     let DynamicToolNamespaceTool::Function(tool) = tool;
+                    if tool.defer_loading {
+                        continue;
+                    }
                     let Some(handler) = DynamicToolHandler::new_in_namespace(namespace, tool)
                     else {
                         tracing::error!(
@@ -1341,8 +1347,7 @@ fn append_dynamic_tool_runtimes(dynamic_tools: &[DynamicToolSpec], registry: &mu
                         );
                         continue;
                     };
-                    registry
-                        .register_external_with_exposure(Arc::new(handler), ToolExposure::Direct);
+                    registry.register_external(Arc::new(handler));
                 }
             }
         }

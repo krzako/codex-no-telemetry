@@ -44,7 +44,7 @@ fn assistant_output_text(text: &str) -> ResponseItem {
 #[tokio::test]
 async fn every_client_exposes_only_host_supplied_tools() {
     for delegated_tools_only in [false, true] {
-        for has_host_tool in [false, true] {
+        for (has_host_tool, defer_loading) in [(false, false), (true, false), (true, true)] {
             let (session, mut turn_context) =
                 crate::session::tests::make_session_and_context().await;
             turn_context.delegated_tools_only = delegated_tools_only;
@@ -60,7 +60,7 @@ async fn every_client_exposes_only_host_supplied_tools() {
                         name: "dsh_lookup".to_string(),
                         description: "Look up data through DSH".to_string(),
                         input_schema: serde_json::json!({"type": "object", "properties": {}}),
-                        defer_loading: true,
+                        defer_loading,
                     })
                 })
                 .into_iter()
@@ -73,7 +73,7 @@ async fn every_client_exposes_only_host_supplied_tools() {
                 step_context.settings.model_info.as_ref(),
             )
             .expect("host-only tool plan should build");
-            let expected = if has_host_tool {
+            let expected = if has_host_tool && !defer_loading {
                 vec!["dsh_lookup"]
             } else {
                 Vec::new()
@@ -85,7 +85,7 @@ async fn every_client_exposes_only_host_supplied_tools() {
                     .map(codex_tools::ToolSpec::name)
                     .collect::<Vec<_>>(),
                 expected,
-                "delegated_tools_only={delegated_tools_only}, has_host_tool={has_host_tool}",
+                "delegated_tools_only={delegated_tools_only}, has_host_tool={has_host_tool}, defer_loading={defer_loading}",
             );
             assert_eq!(
                 router.registered_tool_names_for_test().len(),
