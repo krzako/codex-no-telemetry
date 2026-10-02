@@ -1,7 +1,6 @@
 pub(crate) mod apply_patch;
 pub(crate) mod apply_patch_spec;
 mod dynamic;
-mod mcp;
 pub(crate) mod multi_agents;
 pub(crate) mod multi_agents_common;
 pub(crate) mod multi_agents_spec;
@@ -33,7 +32,6 @@ pub use apply_patch::ApplyPatchHandler;
 use codex_protocol::models::AdditionalPermissionProfile;
 use codex_protocol::protocol::AskForApproval;
 pub use dynamic::DynamicToolHandler;
-pub use mcp::McpHandler;
 pub use request_permissions::RequestPermissionsHandler;
 pub use unified_exec::ExecCommandHandler;
 pub(crate) use unified_exec::ExecCommandHandlerOptions;

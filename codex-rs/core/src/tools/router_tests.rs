@@ -4,10 +4,6 @@ use std::sync::Arc;
 use crate::session::step_context::StepContext;
 use crate::session::tests::make_session_and_context;
 use crate::tools::context::ToolPayload;
-use crate::tools::handlers::McpHandler;
-use crate::tools::registry::CoreToolRuntime;
-use crate::tools::registry::RegisteredTool;
-use crate::tools::registry::ToolExposure;
 use crate::tools::registry::ToolRegistry;
 use crate::tools::spec_plan::append_dynamic_tool_runtimes;
 use codex_protocol::DEFAULT_FUNCTION_NAMESPACE;
@@ -42,15 +38,8 @@ fn tool_log_payload_redacts_plaintext_multi_agent_messages() {
     );
 }
 
-fn test_tool_router(
-    step_context: &StepContext,
-    mcp_tools: Vec<RegisteredTool>,
-    dynamic_tools: &[DynamicToolSpec],
-) -> ToolRouter {
+fn test_tool_router(step_context: &StepContext, dynamic_tools: &[DynamicToolSpec]) -> ToolRouter {
     let mut registry = ToolRegistry::default();
-    for tool in mcp_tools {
-        registry.register_external_with_exposure(tool.runtime, tool.exposure);
-    }
     append_dynamic_tool_runtimes(dynamic_tools, &mut registry);
     ToolRouter::from_registry(
         step_context.turn.as_ref(),
@@ -71,7 +60,7 @@ async fn dynamic_host_tool_does_not_register_native_or_namespaced_shadow() -> an
         input_schema: json!({"type": "object", "properties": {}}),
         defer_loading: false,
     });
-    let router = test_tool_router(step_context.as_ref(), Vec::new(), &[host_tool]);
+    let router = test_tool_router(step_context.as_ref(), &[host_tool]);
 
     assert_eq!(
         router.registered_tool_names_for_test(),
@@ -199,112 +188,11 @@ fn build_tool_call_normalizes_default_function_and_custom_namespaces() -> anyhow
 }
 
 #[tokio::test]
-async fn mcp_parallel_support_uses_handler_data() -> anyhow::Result<()> {
-    let (_, turn) = make_session_and_context().await;
-    let turn = Arc::new(turn);
-    let step_context = StepContext::for_test(Arc::clone(&turn));
-    let router = test_tool_router(
-        step_context.as_ref(),
-        vec![
-            mcp_runtime(mcp_tool_info(
-                "echo",
-                /*supports_parallel_tool_calls*/ true,
-                "mcp__echo__",
-                "query_with_delay",
-            )),
-            RegisteredTool {
-                exposure: ToolExposure::DirectModelOnly,
-                ..mcp_runtime(mcp_tool_info(
-                    "hello_echo",
-                    /*supports_parallel_tool_calls*/ false,
-                    "mcp__hello_echo__",
-                    "query_with_delay",
-                ))
-            },
-            RegisteredTool {
-                exposure: ToolExposure::Hidden,
-                ..mcp_runtime(mcp_tool_info(
-                    "hidden_echo",
-                    /*supports_parallel_tool_calls*/ true,
-                    "mcp__hidden_echo__",
-                    "query_with_delay",
-                ))
-            },
-            RegisteredTool {
-                exposure: ToolExposure::CodeModeOnly,
-                ..mcp_runtime(mcp_tool_info(
-                    "nested_echo",
-                    /*supports_parallel_tool_calls*/ true,
-                    "mcp__nested_echo__",
-                    "query_with_delay",
-                ))
-            },
-        ],
-        &turn.dynamic_tools,
-    );
-
-    let call = ToolCall {
-        tool_name: ToolName::namespaced("mcp__echo__", "query_with_delay"),
-        call_id: "call-handler".to_string(),
-        payload: ToolPayload::Function {
-            arguments: "{}".to_string(),
-        },
-        encrypted_function_args: None,
-    };
-    assert!(router.tool_supports_parallel(&call));
-    assert_eq!(
-        router
-            .tool_runtime(&call.tool_name)
-            .map(|runtime| runtime.tool_name()),
-        Some(call.tool_name.clone())
-    );
-
-    let different_server_call = ToolCall {
-        tool_name: ToolName::namespaced("mcp__hello_echo__", "query_with_delay"),
-        call_id: "call-other-server".to_string(),
-        payload: ToolPayload::Function {
-            arguments: "{}".to_string(),
-        },
-        encrypted_function_args: None,
-    };
-    assert!(!router.tool_supports_parallel(&different_server_call));
-    assert_eq!(
-        router
-            .tool_runtime(&different_server_call.tool_name)
-            .map(|runtime| runtime.tool_name()),
-        Some(different_server_call.tool_name.clone())
-    );
-
-    let hidden_call = ToolCall {
-        tool_name: ToolName::namespaced("mcp__hidden_echo__", "query_with_delay"),
-        call_id: "call-hidden".to_string(),
-        payload: ToolPayload::Function {
-            arguments: "{}".to_string(),
-        },
-        encrypted_function_args: None,
-    };
-    assert!(!router.tool_supports_parallel(&hidden_call));
-    assert!(router.tool_runtime(&hidden_call.tool_name).is_some());
-
-    let nested_only_call = ToolCall {
-        tool_name: ToolName::namespaced("mcp__nested_echo__", "query_with_delay"),
-        call_id: "call-nested-only-server".to_string(),
-        payload: ToolPayload::Function {
-            arguments: "{}".to_string(),
-        },
-        encrypted_function_args: None,
-    };
-    assert!(router.tool_supports_parallel(&nested_only_call));
-
-    Ok(())
-}
-
-#[tokio::test]
 async fn tools_without_handlers_do_not_support_parallel() -> anyhow::Result<()> {
     let (_, turn) = make_session_and_context().await;
     let turn = Arc::new(turn);
     let step_context = StepContext::for_test(Arc::clone(&turn));
-    let router = test_tool_router(step_context.as_ref(), Vec::new(), &turn.dynamic_tools);
+    let router = test_tool_router(step_context.as_ref(), &turn.dynamic_tools);
 
     assert!(!router.tool_supports_parallel(&ToolCall {
         tool_name: ToolName::plain("web_search"),
@@ -352,7 +240,7 @@ async fn specs_filter_deferred_dynamic_tools() -> anyhow::Result<()> {
         ],
     })];
 
-    let router = test_tool_router(step_context.as_ref(), Vec::new(), &dynamic_tools);
+    let router = test_tool_router(step_context.as_ref(), &dynamic_tools);
     let visible_specs = router.model_visible_specs();
 
     assert!(Arc::ptr_eq(&visible_specs, &router.model_visible_specs()));
@@ -377,54 +265,18 @@ async fn specs_filter_deferred_dynamic_tools() -> anyhow::Result<()> {
     };
     let DynamicToolNamespaceTool::Function(hidden) = &mut namespace.tools[0];
     hidden.defer_loading = false;
-    let direct_router = test_tool_router(step_context.as_ref(), Vec::new(), &direct_catalog);
+    let direct_router = test_tool_router(step_context.as_ref(), &direct_catalog);
     assert_eq!(
         namespace_function_names(&direct_router.model_visible_specs(), "codex_app"),
         vec![hidden_tool.to_string(), visible_tool.to_string()]
     );
 
-    let updated_router = test_tool_router(step_context.as_ref(), Vec::new(), &[]);
+    let updated_router = test_tool_router(step_context.as_ref(), &[]);
     let updated_specs = updated_router.model_visible_specs();
     assert!(!Arc::ptr_eq(&visible_specs, &updated_specs));
     assert!(namespace_function_names(&updated_specs, "codex_app").is_empty());
 
     Ok(())
-}
-
-fn mcp_tool_info(
-    server_name: &str,
-    supports_parallel_tool_calls: bool,
-    callable_namespace: &str,
-    tool_name: &str,
-) -> codex_mcp::ToolInfo {
-    codex_mcp::ToolInfo {
-        server_name: server_name.to_string(),
-        supports_parallel_tool_calls,
-        server_origin: None,
-        callable_name: tool_name.to_string(),
-        callable_namespace: callable_namespace.to_string(),
-        namespace_description: None,
-        tool: rmcp::model::Tool::new(
-            tool_name.to_string(),
-            "Test MCP tool",
-            Arc::new(rmcp::model::object(json!({
-                "type": "object",
-            }))),
-        ),
-        openai_file_input_optional_fields: Default::default(),
-        connector_id: None,
-        connector_name: None,
-        plugin_display_names: Vec::new(),
-    }
-}
-
-fn mcp_runtime(tool_info: codex_mcp::ToolInfo) -> RegisteredTool {
-    let runtime = Arc::new(McpHandler::new(tool_info).expect("MCP tool spec should build"))
-        as Arc<dyn CoreToolRuntime>;
-    RegisteredTool {
-        exposure: runtime.exposure(),
-        runtime,
-    }
 }
 
 fn namespace_function_names(specs: &[ToolSpec], namespace_name: &str) -> Vec<String> {
