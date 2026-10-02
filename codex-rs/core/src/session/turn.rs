@@ -1700,6 +1700,12 @@ pub(crate) async fn prepare_tool_recommendations(
     sess: &Session,
     turn_context: &TurnContext,
 ) -> PreparedToolRecommendations {
+    if turn_context.delegated_tools_only {
+        return PreparedToolRecommendations {
+            auth: None,
+            endpoint_candidates: None,
+        };
+    }
     let loaded_plugins = sess
         .services
         .plugins_manager
@@ -1752,6 +1758,18 @@ pub(crate) async fn built_tools(
     step_store: &ExtensionData,
     prepared_recommendations: PreparedToolRecommendations,
 ) -> CodexResult<Arc<ToolRouter>> {
+    if turn_context.delegated_tools_only {
+        return Ok(Arc::new(build_tool_router(
+            sess,
+            turn_context,
+            model_info,
+            environments,
+            mcp,
+            /*apps_enabled*/ false,
+            step_store,
+            /*tool_suggest_candidates*/ None,
+        )?));
+    }
     let all_mcp_tools = mcp.tools();
     let connector_snapshot = mcp.config().connector_snapshot.clone();
 

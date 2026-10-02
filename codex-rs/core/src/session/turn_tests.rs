@@ -2,6 +2,8 @@ use super::*;
 use codex_extension_api::ExtensionData;
 use codex_extension_api::TurnItemContributor;
 use codex_protocol::ResponseItemId;
+use codex_protocol::dynamic_tools::DynamicToolFunctionSpec;
+use codex_protocol::dynamic_tools::DynamicToolSpec;
 use codex_protocol::items::AgentMessageContent;
 use pretty_assertions::assert_eq;
 use std::sync::Arc;
@@ -37,6 +39,44 @@ fn assistant_output_text(text: &str) -> ResponseItem {
         phase: None,
         internal_chat_message_metadata_passthrough: None,
     }
+}
+
+#[tokio::test]
+async fn delegated_turn_skips_native_tool_recommendations_and_discovery() {
+    let (session, mut turn_context) = crate::session::tests::make_session_and_context().await;
+    turn_context.delegated_tools_only = true;
+    turn_context.dynamic_tools = vec![DynamicToolSpec::Function(DynamicToolFunctionSpec {
+        name: "dsh_lookup".to_string(),
+        description: "Look up data through DSH".to_string(),
+        input_schema: serde_json::json!({"type": "object", "properties": {}}),
+        defer_loading: false,
+    })];
+    let turn_context = Arc::new(turn_context);
+    let recommendations = prepare_tool_recommendations(&session, turn_context.as_ref()).await;
+    assert!(recommendations.auth.is_none());
+    assert!(recommendations.endpoint_candidates.is_none());
+
+    let step_context = StepContext::for_test(Arc::clone(&turn_context));
+    let router = built_tools(
+        &session,
+        turn_context.as_ref(),
+        step_context.settings.model_info.as_ref(),
+        &step_context.environments,
+        &step_context.mcp,
+        &turn_context.extension_data,
+        recommendations,
+    )
+    .await
+    .expect("delegated tools should not require native discovery");
+    assert_eq!(
+        router
+            .model_visible_specs()
+            .iter()
+            .map(codex_tools::ToolSpec::name)
+            .collect::<Vec<_>>(),
+        vec!["dsh_lookup"],
+    );
+    assert_eq!(router.registered_tool_names_for_test().len(), 1);
 }
 
 #[test]
