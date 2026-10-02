@@ -12,7 +12,6 @@ use crate::elicitation::ElicitationService;
 use crate::environment_selection::ThreadEnvironments;
 use crate::exec_policy::ExecPolicyManager;
 use crate::mcp::McpManager;
-use crate::mcp_tool_exposure::McpHandlerCache;
 use crate::tools::ExecutedToolCalls;
 use crate::tools::code_mode::CodeModeService;
 use crate::tools::handlers::ToolSearchHandlerCache;
@@ -47,8 +46,6 @@ use tokio::sync::Mutex;
 pub(crate) struct SessionServices {
     /// The single owner of live MCP connections for this thread.
     pub(crate) mcp_runtime: Arc<McpRuntime>,
-    /// Immutable MCP handlers scoped to this thread's current binding.
-    pub(crate) mcp_handler_cache: McpHandlerCache,
     pub(crate) unified_exec_manager: UnifiedExecProcessManager,
     pub(crate) elicitations: ElicitationService,
     #[cfg_attr(not(unix), allow(dead_code))]
