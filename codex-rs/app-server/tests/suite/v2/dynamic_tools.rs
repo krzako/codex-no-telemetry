@@ -141,6 +141,10 @@ async fn thread_start_normalizes_legacy_dynamic_tools_into_model_request() -> Re
     .await??;
 
     let bodies = responses_bodies(&server).await?;
+    let tools = bodies[0]["tools"]
+        .as_array()
+        .context("expected host dynamic tools in the model request")?;
+    assert_eq!(tools.len(), 2, "native tools must not reach the model");
     let function =
         find_tool(&bodies[0], "lookup_ticket").context("expected normalized legacy function")?;
     assert_eq!(
