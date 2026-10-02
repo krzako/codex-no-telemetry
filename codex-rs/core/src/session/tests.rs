@@ -100,7 +100,6 @@ use codex_protocol::turn_input::TurnInput as SubmittedTurnInput;
 use codex_protocol::turn_input::TurnInputMode;
 use codex_protocol::turn_input::TurnInputRequest;
 use codex_protocol::turn_input::TurnInputSubmission;
-use codex_tools::ToolSpec;
 use codex_utils_path_uri::PathUri;
 use std::collections::BTreeMap;
 use tracing::Span;
@@ -987,35 +986,23 @@ async fn preview_session_start_hooks(
     )
 }
 
-pub(crate) fn tool_registry_for_test_step(
-    step_context: &StepContext,
-) -> (ToolRegistry, Vec<ToolSpec>) {
-    let mut registry = crate::tools::spec_plan::build_core_tool_registry(
-        step_context.turn.as_ref(),
-        step_context.turn.model_info(),
-        &step_context.environments,
-        step_context.mcp.as_ref(),
-        /*tool_suggest_candidates*/ None,
-        /*wait_for_environment_tool_config*/ None,
-    );
-    let hosted_specs = crate::tools::spec_plan::append_source_tools(
-        step_context.turn.as_ref(),
-        step_context.turn.model_info(),
-        &mut registry,
-        Vec::new(),
+pub(crate) fn tool_registry_for_test_step(step_context: &StepContext) -> ToolRegistry {
+    let mut registry = ToolRegistry::default();
+    crate::tools::spec_plan::append_dynamic_tool_runtimes(
         &step_context.turn.dynamic_tools,
+        &mut registry,
     );
-    (registry, hosted_specs)
+    registry
 }
 
 fn test_tool_runtime(session: Arc<Session>, turn_context: Arc<TurnContext>) -> ToolCallRuntime {
     let step_context = StepContext::for_test(Arc::clone(&turn_context));
-    let (registry, hosted_specs) = tool_registry_for_test_step(step_context.as_ref());
+    let registry = tool_registry_for_test_step(step_context.as_ref());
     let router = Arc::new(ToolRouter::from_registry(
         step_context.turn.as_ref(),
         step_context.turn.model_info(),
         registry,
-        hosted_specs,
+        Vec::new(),
         &Default::default(),
     ));
     let step_context = step_context.with_tool_router_for_test(router);
@@ -12150,12 +12137,23 @@ async fn abort_review_task_emits_exited_then_aborted_and_records_history() {
 async fn fatal_tool_error_stops_turn_and_reports_error() {
     let (session, turn_context, _rx) = make_session_and_context_with_rx().await;
     let step_context = StepContext::for_test(Arc::clone(&turn_context));
-    let (registry, hosted_specs) = tool_registry_for_test_step(step_context.as_ref());
+    let mut registry = tool_registry_for_test_step(step_context.as_ref());
+    registry.register_external(Arc::new(
+        crate::tools::handlers::DynamicToolHandler::new(
+            &codex_protocol::dynamic_tools::DynamicToolFunctionSpec {
+                name: "exec_command".to_string(),
+                description: "Host-owned shell".to_string(),
+                input_schema: serde_json::json!({"type": "object", "properties": {}}),
+                defer_loading: false,
+            },
+        )
+        .expect("test dynamic tool should be valid"),
+    ));
     let router = ToolRouter::from_registry(
         step_context.turn.as_ref(),
         step_context.turn.model_info(),
         registry,
-        hosted_specs,
+        Vec::new(),
         &Default::default(),
     );
     let item = ResponseItem::CustomToolCall {

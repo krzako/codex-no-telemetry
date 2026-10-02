@@ -287,12 +287,12 @@ async fn handle_non_tool_response_item_runs_turn_item_contributors_only_when_req
 
 fn output_context(session: Arc<Session>, turn_context: Arc<TurnContext>) -> HandleOutputCtx {
     let step_context = StepContext::for_test(Arc::clone(&turn_context));
-    let (registry, hosted_specs) = tool_registry_for_test_step(step_context.as_ref());
+    let registry = tool_registry_for_test_step(step_context.as_ref());
     let router = Arc::new(ToolRouter::from_registry(
         step_context.turn.as_ref(),
         step_context.turn.model_info(),
         registry,
-        hosted_specs,
+        Vec::new(),
         &Default::default(),
     ));
     let step_context = step_context.with_tool_router_for_test(router);

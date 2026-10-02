@@ -53,8 +53,6 @@ use crate::tools::handlers::view_image_spec::ViewImageToolOptions;
 use crate::tools::hosted_spec::WebSearchToolOptions;
 use crate::tools::hosted_spec::create_web_search_tool;
 use crate::tools::multi_agent_tool::multi_agent_v2_handler;
-#[cfg(test)]
-use crate::tools::registry::RegisteredTool;
 use crate::tools::registry::ToolExposure;
 use crate::tools::registry::ToolRegistry;
 use crate::tools::router::ToolRouter;
@@ -116,49 +114,6 @@ pub(crate) fn build_tool_router(
         Vec::new(),
         &session.services.tool_search_handler_cache,
     )
-}
-
-#[cfg(test)]
-#[instrument(level = "trace", skip_all)]
-pub(crate) fn build_core_tool_registry(
-    turn_context: &TurnContext,
-    model_info: &ModelInfo,
-    environments: &TurnEnvironmentSnapshot,
-    mcp: &codex_mcp::McpBinding,
-    tool_suggest_candidates: Option<&crate::tools::router::ToolSuggestCandidates>,
-    wait_for_environment_tool_config: Option<&Arc<crate::WaitForEnvironmentToolConfig>>,
-) -> ToolRegistry {
-    let default_agent_type_description =
-        crate::agent::role::spawn_tool_spec::build(&std::collections::BTreeMap::new());
-    let context = CoreToolPlanContext {
-        turn_context,
-        model_info,
-        environments,
-        mcp,
-        tool_suggest_candidates,
-        wait_for_environment_tool_config,
-        default_agent_type_description: &default_agent_type_description,
-        wait_agent_timeouts: wait_agent_timeout_options(turn_context),
-    };
-    let mut registry = ToolRegistry::default();
-    add_core_tool_sources(&context, &mut registry);
-    registry
-}
-
-#[cfg(test)]
-#[instrument(level = "trace", skip_all)]
-pub(crate) fn append_source_tools(
-    turn_context: &TurnContext,
-    model_info: &ModelInfo,
-    registry: &mut ToolRegistry,
-    mcp_tools: Vec<RegisteredTool>,
-    dynamic_tools: &[DynamicToolSpec],
-) -> Vec<ToolSpec> {
-    for tool in mcp_tools {
-        registry.register_external_with_exposure(tool.runtime, tool.exposure);
-    }
-    append_dynamic_tool_runtimes(dynamic_tools, registry);
-    hosted_model_tool_specs(turn_context, model_info, &[])
 }
 
 #[instrument(level = "trace", skip_all)]
