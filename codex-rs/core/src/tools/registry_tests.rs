@@ -531,22 +531,6 @@ async fn spawn_agent_function_tools_use_agent_matcher_alias() {
 }
 
 #[tokio::test]
-async fn code_mode_wait_does_not_expose_default_hook_payloads() {
-    let (session, turn) = crate::session::tests::make_session_and_context().await;
-    let output = crate::tools::context::FunctionToolOutput::from_text("ok".to_string(), Some(true));
-
-    let wait = crate::tools::handlers::CodeModeWaitHandler;
-    let wait_invocation = test_invocation(
-        Arc::new(session),
-        Arc::new(turn),
-        "wait-call",
-        wait.tool_name(),
-    );
-    assert_eq!(wait.pre_tool_use_payload(&wait_invocation), None);
-    assert_eq!(wait.post_tool_use_payload(&wait_invocation, &output), None);
-}
-
-#[tokio::test]
 async fn write_stdin_does_not_expose_default_pre_tool_use_payload() {
     let (session, turn) = crate::session::tests::make_session_and_context().await;
 

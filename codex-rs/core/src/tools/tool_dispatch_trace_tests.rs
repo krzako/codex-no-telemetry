@@ -16,9 +16,6 @@ use crate::session::session::Session;
 use crate::session::step_context::StepContext;
 use crate::session::tests::make_session_and_context;
 use crate::session::turn_context::TurnContext;
-use crate::tools::code_mode::CodeModeService;
-use crate::tools::code_mode::CodeModeWaitHandler;
-use crate::tools::code_mode::WAIT_TOOL_NAME;
 use crate::tools::context::FunctionToolOutput;
 use crate::tools::context::ToolCallSource;
 use crate::tools::context::ToolInvocation;
@@ -62,55 +59,6 @@ impl ToolExecutor<ToolInvocation> for TestHandler {
 }
 
 impl CoreToolRuntime for TestHandler {}
-
-struct MissingCellCodeModeSessionProvider;
-
-impl codex_code_mode::CodeModeSessionProvider for MissingCellCodeModeSessionProvider {
-    fn create_session(&self) -> codex_code_mode::CodeModeSessionProviderFuture<'_> {
-        Box::pin(async {
-            Ok(Arc::new(MissingCellCodeModeSession) as Arc<dyn codex_code_mode::CodeModeSession>)
-        })
-    }
-}
-
-struct MissingCellCodeModeSession;
-
-impl codex_code_mode::CodeModeSession for MissingCellCodeModeSession {
-    fn execute<'a>(
-        &'a self,
-        _request: codex_code_mode::ExecuteRequest,
-        _delegate: Arc<dyn codex_code_mode::CodeModeSessionDelegate>,
-    ) -> codex_code_mode::CodeModeSessionResultFuture<'a, codex_code_mode::StartedCell> {
-        Box::pin(async { Err("test session cannot execute cells".to_string()) })
-    }
-
-    fn wait<'a>(
-        &'a self,
-        request: codex_code_mode::WaitRequest,
-    ) -> codex_code_mode::CodeModeSessionResultFuture<'a, codex_code_mode::WaitOutcome> {
-        self.terminate(request.cell_id)
-    }
-
-    fn terminate<'a>(
-        &'a self,
-        cell_id: codex_code_mode::CellId,
-    ) -> codex_code_mode::CodeModeSessionResultFuture<'a, codex_code_mode::WaitOutcome> {
-        Box::pin(async move {
-            Ok(codex_code_mode::WaitOutcome::MissingCell(
-                codex_code_mode::RuntimeResponse::Result {
-                    code_mode_host_duration: None,
-                    error_text: Some(format!("exec cell {cell_id} not found")),
-                    cell_id,
-                    content_items: Vec::new(),
-                },
-            ))
-        })
-    }
-
-    fn shutdown<'a>(&'a self) -> codex_code_mode::CodeModeSessionResultFuture<'a, ()> {
-        Box::pin(async { Ok(()) })
-    }
-}
 
 #[tokio::test]
 async fn dispatch_lifecycle_trace_records_direct_and_code_mode_requesters() -> anyhow::Result<()> {
@@ -271,53 +219,6 @@ async fn dispatch_lifecycle_trace_records_incompatible_payload_failures() -> any
     let tool_call = &replayed.tool_calls["incompatible-call"];
     assert_eq!(tool_call.execution.status, ExecutionStatus::Failed);
     assert!(tool_call.raw_result_payload_id.is_some());
-
-    Ok(())
-}
-
-#[tokio::test]
-async fn missing_code_mode_wait_traces_only_the_wait_tool_call() -> anyhow::Result<()> {
-    let temp = TempDir::new()?;
-    let (mut session, turn) = make_session_and_context().await;
-    session.services.code_mode_service = CodeModeService::new(
-        session.thread_id,
-        Arc::new(MissingCellCodeModeSessionProvider),
-        &turn.config.code_mode,
-        session.services.executed_tool_calls.clone(),
-    );
-    attach_test_trace(&mut session, &turn, temp.path())?;
-
-    let registry = ToolRegistry::with_handler_for_test(Arc::new(CodeModeWaitHandler));
-    let session = Arc::new(session);
-    let turn = Arc::new(turn);
-
-    let mut invocation = test_invocation(
-        session,
-        turn,
-        "wait-call",
-        WAIT_TOOL_NAME,
-        ToolCallSource::Direct,
-        r#"{"cell_id":"noop","terminate":true}"#,
-    );
-    invocation.tool_name = invocation.tool_name.with_default_namespace();
-    assert!(
-        super::tool_dispatch_invocation(&invocation)
-            .expect("wait calls should produce a trace invocation")
-            .tool_namespace
-            .is_none()
-    );
-
-    registry
-        .dispatch_any_with_terminal_outcome(invocation, /*terminal_outcome_reached*/ None)
-        .await?;
-
-    let replayed = codex_rollout_trace::replay_bundle(single_bundle_dir(temp.path())?)?;
-    assert_eq!(replayed.code_cells.len(), 0);
-    assert!(
-        replayed.tool_calls["wait-call"]
-            .raw_result_payload_id
-            .is_some()
-    );
 
     Ok(())
 }

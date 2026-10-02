@@ -2,8 +2,6 @@ mod delegate;
 mod output;
 mod response_adapter;
 mod telemetry;
-mod wait_handler;
-pub(crate) mod wait_spec;
 
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
@@ -29,7 +27,6 @@ use crate::original_image_detail::can_request_original_image_detail;
 use crate::original_image_detail::sanitize_original_image_detail as sanitize_image_detail_items;
 use crate::session::session::Session;
 use crate::session::step_context::StepContext;
-use crate::session::turn_context::TurnContext;
 use crate::tools::ExecutedToolCalls;
 use crate::tools::call_trace;
 use crate::tools::context::FunctionToolOutput;
@@ -51,21 +48,13 @@ use delegate::CodeModeDispatchBroker;
 use delegate::CodeModeDispatchWorker;
 use output::CodeModeToolOutput;
 use response_adapter::into_function_call_output_content_items;
-pub(crate) use wait_handler::CodeModeWaitHandler;
 
 pub(crate) const PUBLIC_TOOL_NAME: &str = codex_code_mode::PUBLIC_TOOL_NAME;
 pub(crate) const WAIT_TOOL_NAME: &str = codex_code_mode::WAIT_TOOL_NAME;
-pub(crate) const DEFAULT_WAIT_YIELD_TIME_MS: u64 = codex_code_mode::DEFAULT_WAIT_YIELD_TIME_MS;
 
 /// Returns true for the code-mode `exec` tool in the default namespace.
 pub(crate) fn is_exec_tool_name(tool_name: &ToolName) -> bool {
     tool_name.is_default_namespace() && tool_name.name == PUBLIC_TOOL_NAME
-}
-
-#[derive(Clone)]
-pub(crate) struct ExecContext {
-    pub(super) session: Arc<Session>,
-    pub(super) turn: Arc<TurnContext>,
 }
 
 pub(crate) struct CodeModeService {
