@@ -1,12 +1,8 @@
 use crate::agent::exceeds_thread_spawn_depth_limit;
 use crate::agent::next_thread_spawn_depth;
-use crate::image_preparation::unified_image_budget_enabled;
 use crate::session::session::Session;
 use crate::session::turn_context::TurnContext;
-use crate::tools::code_mode::execute_spec::create_code_mode_tool;
 use crate::tools::effective_tool_mode;
-use crate::tools::handlers::CodeModeExecuteHandler;
-use crate::tools::handlers::CodeModeWaitHandler;
 use crate::tools::handlers::DynamicToolHandler;
 use crate::tools::handlers::multi_agents_spec::MULTI_AGENT_V1_NAMESPACE;
 use crate::tools::registry::ToolExposure;
@@ -26,7 +22,6 @@ use codex_tools::ResponsesApiNamespaceTool;
 use codex_tools::TOOL_SEARCH_TOOL_NAME;
 use codex_tools::ToolName;
 use codex_tools::ToolSpec;
-use codex_tools::collect_code_mode_exec_prompt_tool_definitions;
 use codex_tools::default_namespace_description;
 use std::collections::BTreeMap;
 use std::collections::btree_map::Entry;
@@ -242,12 +237,6 @@ fn spec_for_model_request(
     }
 }
 
-pub(crate) fn search_tool_enabled(turn_context: &TurnContext, model_info: &ModelInfo) -> bool {
-    !turn_context.delegated_tools_only
-        && model_info.supports_search_tool
-        && namespace_tools_enabled(turn_context)
-}
-
 pub(crate) fn tool_suggest_enabled(turn_context: &TurnContext) -> bool {
     let features = turn_context.config.features.get();
     features.enabled(Feature::ToolSuggest)
@@ -339,114 +328,6 @@ fn is_excluded_from_code_mode(turn_context: &TurnContext, tool_name: &ToolName) 
     })
 }
 
-fn register_code_mode_executors(
-    turn_context: &TurnContext,
-    model_info: &ModelInfo,
-    registry: &mut ToolRegistry,
-) -> BTreeMap<String, ToolName> {
-    let tool_mode = effective_tool_mode(turn_context, model_info);
-    if !matches!(tool_mode, ToolMode::CodeMode | ToolMode::CodeModeOnly) {
-        return BTreeMap::new();
-    }
-
-    let mut code_mode_tool_names = BTreeMap::new();
-    let mut code_mode_nested_tool_specs = Vec::new();
-    let mut exec_prompt_tool_specs = Vec::new();
-    let mut deferred_exec_prompt_tool_specs = Vec::new();
-    let mut included_deferred_mcp_output_schema = false;
-    let deferred_tools_guidance_enabled = search_tool_enabled(turn_context, model_info);
-    for tool in registry.entries() {
-        let exposure = tool.exposure;
-        if !exposure.is_available_in_code_mode() {
-            continue;
-        }
-
-        let tool_name = tool.runtime.tool_name();
-        if is_excluded_from_code_mode(turn_context, &tool_name) {
-            continue;
-        }
-
-        let immutable_spec = tool.runtime.immutable_spec();
-        let cached_runtime = immutable_spec.map(|_| Arc::clone(&tool.runtime));
-        let spec = immutable_spec
-            .map(Arc::clone)
-            .unwrap_or_else(|| Arc::new(tool.runtime.spec()));
-        // Derive the name without serializing and augmenting every tool schema.
-        let code_mode_name = match spec.as_ref() {
-            ToolSpec::Function(_) | ToolSpec::Freeform(_) => {
-                codex_tools::code_mode_name_for_tool_name(&tool_name)
-            }
-            ToolSpec::Namespace(namespace) if !namespace.tools.is_empty() => {
-                codex_tools::code_mode_name_for_tool_name(&tool_name)
-            }
-            ToolSpec::Namespace(_) | ToolSpec::ToolSearch { .. } | ToolSpec::WebSearch { .. } => {
-                continue;
-            }
-        };
-        if !codex_code_mode::is_code_mode_nested_tool(&code_mode_name) {
-            continue;
-        }
-        match code_mode_tool_names.entry(codex_code_mode::normalize_code_mode_identifier(
-            &code_mode_name,
-        )) {
-            Entry::Vacant(entry) => {
-                entry.insert(tool_name);
-            }
-            Entry::Occupied(_) => {
-                tracing::warn!(
-                    tool_name = %tool_name,
-                    code_mode_name = %code_mode_name,
-                    "skipping tool with a duplicate normalized code-mode name"
-                );
-                continue;
-            }
-        }
-
-        if exposure == ToolExposure::Deferred {
-            if deferred_tools_guidance_enabled
-                && (cached_runtime.is_none() || !included_deferred_mcp_output_schema)
-            {
-                if cached_runtime.is_some() {
-                    included_deferred_mcp_output_schema = true;
-                }
-                deferred_exec_prompt_tool_specs.push(Arc::clone(&spec));
-            }
-        } else {
-            exec_prompt_tool_specs.push(spec.as_ref().clone());
-        }
-        code_mode_nested_tool_specs.push((spec, cached_runtime));
-    }
-
-    let namespace_descriptions = code_mode_namespace_descriptions(&exec_prompt_tool_specs);
-    let mut enabled_tools =
-        collect_code_mode_exec_prompt_tool_definitions(exec_prompt_tool_specs.iter());
-    let deferred_tools = collect_code_mode_exec_prompt_tool_definitions(
-        deferred_exec_prompt_tool_specs.iter().map(Arc::as_ref),
-    );
-    enabled_tools
-        .sort_by(|left, right| compare_code_mode_tools(left, right, &namespace_descriptions));
-    let execute_handler = CodeModeExecuteHandler::new(
-        create_code_mode_tool(
-            &enabled_tools,
-            &deferred_tools,
-            &namespace_descriptions,
-            turn_context.config.code_mode.default_exec_yield_time_ms,
-            tool_mode == ToolMode::CodeModeOnly,
-            if unified_image_budget_enabled(&turn_context.config.features, model_info) {
-                codex_code_mode::ImageDetailVisibility::Hidden
-            } else {
-                codex_code_mode::ImageDetailVisibility::Visible
-            },
-        ),
-        code_mode_nested_tool_specs,
-    );
-
-    registry.prepend_trusted(Arc::new(CodeModeWaitHandler));
-    registry.prepend_trusted(Arc::new(execute_handler));
-
-    code_mode_tool_names
-}
-
 #[instrument(level = "trace", skip_all, fields(tool_spec_count = specs.len()))]
 fn merge_into_namespaces(specs: Vec<ToolSpec>) -> Vec<ToolSpec> {
     let mut merged_specs = Vec::with_capacity(specs.len());
@@ -499,28 +380,6 @@ fn merge_into_namespaces(specs: Vec<ToolSpec>) -> Vec<ToolSpec> {
     merged_specs
 }
 
-fn code_mode_namespace_descriptions(
-    specs: &[ToolSpec],
-) -> BTreeMap<String, codex_code_mode::ToolNamespaceDescription> {
-    let mut namespace_descriptions = BTreeMap::new();
-    for spec in specs {
-        let ToolSpec::Namespace(namespace) = spec else {
-            continue;
-        };
-
-        let entry = namespace_descriptions
-            .entry(namespace.name.clone())
-            .or_insert_with(|| codex_code_mode::ToolNamespaceDescription {
-                name: namespace.name.clone(),
-                description: namespace.description.clone(),
-            });
-        if entry.description.trim().is_empty() && !namespace.description.trim().is_empty() {
-            entry.description = namespace.description.clone();
-        }
-    }
-    namespace_descriptions
-}
-
 #[instrument(level = "trace", skip_all, fields(dynamic_tool_count = dynamic_tools.len()))]
 pub(crate) fn append_dynamic_tool_runtimes(
     dynamic_tools: &[DynamicToolSpec],
@@ -561,29 +420,4 @@ pub(crate) fn append_dynamic_tool_runtimes(
             }
         }
     }
-}
-
-fn compare_code_mode_tools(
-    left: &codex_code_mode::ToolDefinition,
-    right: &codex_code_mode::ToolDefinition,
-    namespace_descriptions: &BTreeMap<String, codex_code_mode::ToolNamespaceDescription>,
-) -> std::cmp::Ordering {
-    let left_namespace = code_mode_namespace_name(left, namespace_descriptions);
-    let right_namespace = code_mode_namespace_name(right, namespace_descriptions);
-
-    left_namespace
-        .cmp(&right_namespace)
-        .then_with(|| left.tool_name.name.cmp(&right.tool_name.name))
-        .then_with(|| left.name.cmp(&right.name))
-}
-
-fn code_mode_namespace_name<'a>(
-    tool: &codex_code_mode::ToolDefinition,
-    namespace_descriptions: &'a BTreeMap<String, codex_code_mode::ToolNamespaceDescription>,
-) -> Option<&'a str> {
-    tool.tool_name
-        .namespace
-        .as_ref()
-        .and_then(|namespace| namespace_descriptions.get(namespace))
-        .map(|namespace_description| namespace_description.name.as_str())
 }
