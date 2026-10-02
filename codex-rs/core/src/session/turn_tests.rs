@@ -42,41 +42,61 @@ fn assistant_output_text(text: &str) -> ResponseItem {
 }
 
 #[tokio::test]
-async fn delegated_turn_skips_native_tool_recommendations_and_discovery() {
-    let (session, mut turn_context) = crate::session::tests::make_session_and_context().await;
-    turn_context.delegated_tools_only = true;
-    turn_context.dynamic_tools = vec![DynamicToolSpec::Function(DynamicToolFunctionSpec {
-        name: "dsh_lookup".to_string(),
-        description: "Look up data through DSH".to_string(),
-        input_schema: serde_json::json!({"type": "object", "properties": {}}),
-        defer_loading: false,
-    })];
-    let turn_context = Arc::new(turn_context);
-    let recommendations = prepare_tool_recommendations(&session, turn_context.as_ref()).await;
-    assert!(recommendations.auth.is_none());
-    assert!(recommendations.endpoint_candidates.is_none());
-
-    let step_context = StepContext::for_test(Arc::clone(&turn_context));
-    let router = built_tools(
-        &session,
-        turn_context.as_ref(),
-        step_context.settings.model_info.as_ref(),
-        &step_context.environments,
-        &step_context.mcp,
-        &turn_context.extension_data,
-        recommendations,
-    )
-    .await
-    .expect("delegated tools should not require native discovery");
-    assert_eq!(
-        router
-            .model_visible_specs()
-            .iter()
-            .map(codex_tools::ToolSpec::name)
-            .collect::<Vec<_>>(),
-        vec!["dsh_lookup"],
-    );
-    assert_eq!(router.registered_tool_names_for_test().len(), 1);
+async fn every_client_exposes_only_host_supplied_tools() {
+    for delegated_tools_only in [false, true] {
+        for has_host_tool in [false, true] {
+            let (session, mut turn_context) =
+                crate::session::tests::make_session_and_context().await;
+            turn_context.delegated_tools_only = delegated_tools_only;
+            let config = Arc::make_mut(&mut turn_context.config);
+            config.update_plan_enabled = true;
+            config
+                .features
+                .enable(Feature::ViewImage)
+                .expect("view image feature should be enableable");
+            turn_context.dynamic_tools = has_host_tool
+                .then(|| {
+                    DynamicToolSpec::Function(DynamicToolFunctionSpec {
+                        name: "dsh_lookup".to_string(),
+                        description: "Look up data through DSH".to_string(),
+                        input_schema: serde_json::json!({"type": "object", "properties": {}}),
+                        defer_loading: true,
+                    })
+                })
+                .into_iter()
+                .collect();
+            let turn_context = Arc::new(turn_context);
+            let step_context = StepContext::for_test(Arc::clone(&turn_context));
+            let router = built_tools(
+                &session,
+                turn_context.as_ref(),
+                step_context.settings.model_info.as_ref(),
+            )
+            .expect("host-only tool plan should build");
+            let expected = if has_host_tool {
+                vec!["dsh_lookup"]
+            } else {
+                Vec::new()
+            };
+            assert_eq!(
+                router
+                    .model_visible_specs()
+                    .iter()
+                    .map(codex_tools::ToolSpec::name)
+                    .collect::<Vec<_>>(),
+                expected,
+                "delegated_tools_only={delegated_tools_only}, has_host_tool={has_host_tool}",
+            );
+            assert_eq!(
+                router.registered_tool_names_for_test().len(),
+                expected.len()
+            );
+            assert_eq!(
+                router.tool_mode(),
+                codex_protocol::openai_models::ToolMode::Direct
+            );
+        }
+    }
 }
 
 #[test]

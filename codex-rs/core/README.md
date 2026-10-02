@@ -2,6 +2,15 @@
 
 This crate implements the business logic for Codex. It is designed to be used by the various Codex UIs written in Rust.
 
+## Model tools in the DSH fork
+
+Every client advertises only dynamic tools supplied by its host. With an empty
+dynamic catalog, the model receives no tools. Native shell, patch, MCP, web,
+plugin, and code-mode tools are not registered in the active tool plan. Dynamic
+tools use direct function calls even when their input requests deferred loading;
+the host owns discovery and may use names formerly reserved by native tools.
+The shared dispatcher still routes admitted dynamic calls to the host callback.
+
 ## Wine-exec integration tests
 
 On x86-64 Linux, run the shared suite against the Windows exec server with

@@ -3791,18 +3791,13 @@ impl Session {
                 .collect::<HashMap<_, _>>();
             extension_data.insert(sandbox_contexts);
         }
-        let (mcp, prepared_recommendations) = async {
-            tokio::join!(
-                // MCP refresh can be large; keep it off the sampling request's stack.
-                Box::pin(self.mcp_runtime_for_step(
-                    turn_context.as_ref(),
-                    &selected_capability_roots,
-                    required_servers,
-                    required_plugins,
-                )),
-                turn::prepare_tool_recommendations(self.as_ref(), turn_context.as_ref()),
-            )
-        }
+        // MCP refresh can be large; keep it off the sampling request's stack.
+        let mcp = Box::pin(self.mcp_runtime_for_step(
+            turn_context.as_ref(),
+            &selected_capability_roots,
+            required_servers,
+            required_plugins,
+        ))
         .or_cancel(cancellation_token)
         .await?;
         let mut selected_plugins = self
@@ -3818,17 +3813,8 @@ impl Session {
         });
         extension_data.insert(selected_plugins.clone());
         turn_context.extension_data.insert(selected_plugins);
-        let tool_router = turn::built_tools(
-            self.as_ref(),
-            turn_context.as_ref(),
-            &settings.model_info,
-            &environments,
-            &mcp,
-            &extension_data,
-            prepared_recommendations,
-        )
-        .or_cancel(cancellation_token)
-        .await??;
+        let tool_router =
+            turn::built_tools(self.as_ref(), turn_context.as_ref(), &settings.model_info)?;
         Ok(Arc::new(StepContext {
             settings,
             token_budget,

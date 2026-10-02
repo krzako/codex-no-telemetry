@@ -122,75 +122,14 @@ pub(crate) fn build_tool_router(
     session: &Session,
     turn_context: &TurnContext,
     model_info: &ModelInfo,
-    environments: &TurnEnvironmentSnapshot,
-    mcp: &Arc<codex_mcp::McpBinding>,
-    apps_enabled: bool,
-    step_store: &ExtensionData,
-    tool_suggest_candidates: Option<&crate::tools::router::ToolSuggestCandidates>,
 ) -> CodexResult<ToolRouter> {
-    if turn_context.delegated_tools_only {
-        let mut registry = ToolRegistry::with_allowed_tools(session.allowed_tools.clone());
-        append_dynamic_tool_runtimes(&turn_context.dynamic_tools, &mut registry);
-        return finalize_tool_router(
-            turn_context,
-            model_info,
-            registry,
-            Vec::new(),
-            &session.services.tool_search_handler_cache,
-        );
-    }
-    let default_agent_type_description =
-        crate::agent::role::spawn_tool_spec::build(&std::collections::BTreeMap::new());
-    let wait_for_environment_tool_config = session
-        .services
-        .thread_extension_data
-        .get::<crate::WaitForEnvironmentToolConfig>();
-    let context = CoreToolPlanContext {
-        turn_context,
-        model_info,
-        environments,
-        mcp,
-        tool_suggest_candidates,
-        wait_for_environment_tool_config: wait_for_environment_tool_config.as_ref(),
-        default_agent_type_description: &default_agent_type_description,
-        wait_agent_timeouts: wait_agent_timeout_options(turn_context),
-    };
     let mut registry = ToolRegistry::with_allowed_tools(session.allowed_tools.clone());
-    add_core_tool_sources(&context, &mut registry);
-
-    let registered_mcp_tools = session.services.mcp_handler_cache.append_mcp_tools(
-        mcp,
-        &turn_context.config,
-        apps_enabled,
-        &mcp.config().mcp_server_catalog,
-        search_tool_enabled(turn_context, model_info),
-        &mut registry,
-    );
-    apply_mcp_tool_exposure_policy(
-        turn_context,
-        model_info,
-        mcp,
-        &registered_mcp_tools,
-        &mut registry,
-    );
-    let standalone_web_search_tool = append_extension_tool_executors(
-        turn_context,
-        model_info,
-        extension_tool_executors(session, step_store),
-        &mut registry,
-    );
     append_dynamic_tool_runtimes(&turn_context.dynamic_tools, &mut registry);
-    let hosted_specs = hosted_model_tool_specs(
-        turn_context,
-        model_info,
-        standalone_web_search_tool.as_slice(),
-    );
-
     finalize_tool_router(
         turn_context,
         model_info,
         registry,
-        hosted_specs,
+        Vec::new(),
         &session.services.tool_search_handler_cache,
     )
 }
@@ -1388,7 +1327,7 @@ fn append_dynamic_tool_runtimes(dynamic_tools: &[DynamicToolSpec], registry: &mu
                     );
                     continue;
                 };
-                registry.register_external(Arc::new(handler));
+                registry.register_external_with_exposure(Arc::new(handler), ToolExposure::Direct);
             }
             DynamicToolSpec::Namespace(namespace) => {
                 for tool in &namespace.tools {
@@ -1402,7 +1341,8 @@ fn append_dynamic_tool_runtimes(dynamic_tools: &[DynamicToolSpec], registry: &mu
                         );
                         continue;
                     };
-                    registry.register_external(Arc::new(handler));
+                    registry
+                        .register_external_with_exposure(Arc::new(handler), ToolExposure::Direct);
                 }
             }
         }
@@ -1482,7 +1422,3 @@ fn code_mode_namespace_name<'a>(
         .and_then(|namespace| namespace_descriptions.get(namespace))
         .map(|namespace_description| namespace_description.name.as_str())
 }
-
-#[cfg(test)]
-#[path = "spec_plan_tests.rs"]
-mod tests;

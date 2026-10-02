@@ -79,19 +79,11 @@ pub(crate) fn requested_tool_mode(turn_context: &TurnContext, model_info: &Model
     })
 }
 
-pub(crate) fn effective_tool_mode(turn_context: &TurnContext, model_info: &ModelInfo) -> ToolMode {
-    if turn_context.delegated_tools_only {
-        return ToolMode::Direct;
-    }
-    let requested_tool_mode = requested_tool_mode(turn_context, model_info);
-    if !turn_context.code_mode_available
-        && requested_tool_mode == ToolMode::CodeMode
-        && !turn_context.config.code_mode.disable_in_process_fallback
-    {
-        ToolMode::Direct
-    } else {
-        requested_tool_mode
-    }
+pub(crate) fn effective_tool_mode(
+    _turn_context: &TurnContext,
+    _model_info: &ModelInfo,
+) -> ToolMode {
+    ToolMode::Direct
 }
 
 /// Format the combined exec output for sending back to the model.
