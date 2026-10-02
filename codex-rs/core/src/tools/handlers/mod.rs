@@ -13,8 +13,6 @@ pub(crate) mod shell_spec;
 mod tool_search;
 pub(crate) mod tool_search_spec;
 pub(crate) mod unified_exec;
-mod view_image;
-pub(crate) mod view_image_spec;
 mod wait_for_environment;
 
 use codex_file_system::FileSystemSandboxContext;
@@ -48,7 +46,6 @@ pub(crate) use tool_search::ToolSearchHandlerCache;
 pub use unified_exec::ExecCommandHandler;
 pub(crate) use unified_exec::ExecCommandHandlerOptions;
 pub use unified_exec::WriteStdinHandler;
-pub use view_image::ViewImageHandler;
 pub(crate) use wait_for_environment::WaitForEnvironmentHandler;
 pub use wait_for_environment::WaitForEnvironmentToolConfig;
 
