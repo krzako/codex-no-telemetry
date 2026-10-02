@@ -16,7 +16,6 @@ use codex_protocol::dynamic_tools::DynamicToolSpec;
 use codex_protocol::error::CodexErrorDetails;
 use codex_protocol::error::Result as CodexResult;
 use codex_protocol::openai_models::ModelInfo;
-use codex_protocol::openai_models::ToolMode;
 use codex_protocol::protocol::MultiAgentVersion;
 use codex_tools::ResponsesApiNamespaceTool;
 use codex_tools::TOOL_SEARCH_TOOL_NAME;
@@ -44,13 +43,12 @@ pub(crate) fn build_tool_router(
 pub(crate) fn finalize_tool_router(
     turn_context: &TurnContext,
     model_info: &ModelInfo,
-    mut registry: ToolRegistry,
+    registry: ToolRegistry,
     mut hosted_specs: Vec<ToolSpec>,
 ) -> CodexResult<ToolRouter> {
     if let Some(allowed) = &registry.allowed_tools {
         hosted_specs.retain(|spec| allowed.contains(&ToolName::plain(spec.name())));
     }
-    apply_direct_model_only_namespace_overrides(turn_context, &mut registry);
     let tool_mode = effective_tool_mode(turn_context, model_info);
     let code_mode_tool_names = BTreeMap::new();
     let include_tool_namespaces_info = turn_context
@@ -115,13 +113,7 @@ pub(crate) fn finalize_tool_router(
         }
     }
 
-    let model_visible_specs = build_model_visible_specs(
-        turn_context,
-        model_info,
-        &registry,
-        &code_mode_tool_names,
-        hosted_specs,
-    );
+    let model_visible_specs = build_model_visible_specs(turn_context, &registry, hosted_specs);
     let tool_namespaces_info = include_tool_namespaces_info
         .then(|| {
             collect_tool_namespaces_info(&registry, &code_mode_tool_names, &model_visible_specs)
@@ -139,45 +131,10 @@ pub(crate) fn finalize_tool_router(
     ))
 }
 
-fn apply_direct_model_only_namespace_overrides(
-    turn_context: &TurnContext,
-    registry: &mut ToolRegistry,
-) {
-    if turn_context
-        .config
-        .code_mode
-        .direct_only_tool_namespaces
-        .is_empty()
-    {
-        return;
-    }
-
-    for tool in registry.entries_mut() {
-        let configured = tool
-            .runtime
-            .tool_name()
-            .with_default_namespace()
-            .namespace
-            .as_ref()
-            .is_some_and(|namespace| {
-                turn_context
-                    .config
-                    .code_mode
-                    .direct_only_tool_namespaces
-                    .contains(namespace)
-            });
-        if configured && tool.exposure.is_available_in_code_mode() {
-            tool.exposure = ToolExposure::DirectModelOnly;
-        }
-    }
-}
-
 #[instrument(level = "trace", skip_all)]
 fn build_model_visible_specs(
     turn_context: &TurnContext,
-    model_info: &ModelInfo,
     registry: &ToolRegistry,
-    code_mode_tool_names: &BTreeMap<String, ToolName>,
     hosted_specs: Vec<ToolSpec>,
 ) -> Vec<ToolSpec> {
     let mut specs = Vec::new();
@@ -187,20 +144,7 @@ fn build_model_visible_specs(
             continue;
         }
 
-        let tool_name = tool.runtime.tool_name();
-        if is_hidden_by_code_mode_only(turn_context, model_info, &tool_name, exposure) {
-            continue;
-        }
-
-        let spec = tool.runtime.spec();
-        specs.push(spec_for_model_request(
-            turn_context,
-            model_info,
-            exposure,
-            &tool_name,
-            code_mode_tool_names,
-            spec,
-        ));
+        specs.push(tool.runtime.spec());
     }
     specs.extend(hosted_specs);
 
@@ -210,31 +154,6 @@ fn build_model_visible_specs(
             namespace_tools_enabled(turn_context) || !matches!(spec, ToolSpec::Namespace(_))
         })
         .collect()
-}
-
-fn spec_for_model_request(
-    turn_context: &TurnContext,
-    model_info: &ModelInfo,
-    exposure: ToolExposure,
-    tool_name: &ToolName,
-    code_mode_tool_names: &BTreeMap<String, ToolName>,
-    spec: ToolSpec,
-) -> ToolSpec {
-    let tool_mode = effective_tool_mode(turn_context, model_info);
-    if matches!(tool_mode, ToolMode::CodeMode | ToolMode::CodeModeOnly)
-        && exposure.is_available_in_code_mode()
-        && !is_excluded_from_code_mode(turn_context, tool_name)
-        && codex_code_mode::is_code_mode_nested_tool(spec.name())
-        && code_mode_tool_names
-            .get(&codex_code_mode::normalize_code_mode_identifier(
-                &codex_tools::code_mode_name_for_tool_name(tool_name),
-            ))
-            .is_some_and(|winner| winner == tool_name)
-    {
-        codex_tools::augment_tool_spec_for_code_mode(spec)
-    } else {
-        spec
-    }
 }
 
 pub(crate) fn tool_suggest_enabled(turn_context: &TurnContext) -> bool {
@@ -301,31 +220,6 @@ fn required_child_management_tool_names(
         tools.push(ToolName::new(namespace.map(str::to_owned), "wait_agent"));
     }
     tools
-}
-
-fn is_hidden_by_code_mode_only(
-    turn_context: &TurnContext,
-    model_info: &ModelInfo,
-    tool_name: &ToolName,
-    exposure: ToolExposure,
-) -> bool {
-    let tool_mode = effective_tool_mode(turn_context, model_info);
-    tool_mode == ToolMode::CodeModeOnly
-        && exposure.is_available_in_code_mode()
-        && codex_code_mode::is_code_mode_nested_tool(&codex_tools::code_mode_name_for_tool_name(
-            tool_name,
-        ))
-}
-
-fn is_excluded_from_code_mode(turn_context: &TurnContext, tool_name: &ToolName) -> bool {
-    let tool_name = tool_name.clone().with_default_namespace();
-    tool_name.namespace.as_ref().is_some_and(|namespace| {
-        turn_context
-            .config
-            .code_mode
-            .excluded_tool_namespaces
-            .contains(namespace)
-    })
 }
 
 #[instrument(level = "trace", skip_all, fields(tool_spec_count = specs.len()))]
