@@ -8,8 +8,8 @@ use crate::tools::handlers::McpHandler;
 use crate::tools::registry::CoreToolRuntime;
 use crate::tools::registry::RegisteredTool;
 use crate::tools::registry::ToolExposure;
-use crate::tools::spec_plan::append_source_tools;
-use crate::tools::spec_plan::build_core_tool_registry;
+use crate::tools::registry::ToolRegistry;
+use crate::tools::spec_plan::append_dynamic_tool_runtimes;
 use codex_protocol::DEFAULT_FUNCTION_NAMESPACE;
 use codex_protocol::dynamic_tools::DynamicToolFunctionSpec;
 use codex_protocol::dynamic_tools::DynamicToolNamespaceSpec;
@@ -47,60 +47,50 @@ fn test_tool_router(
     mcp_tools: Vec<RegisteredTool>,
     dynamic_tools: &[DynamicToolSpec],
 ) -> ToolRouter {
-    let mut registry = build_core_tool_registry(
-        step_context.turn.as_ref(),
-        step_context.turn.model_info(),
-        &step_context.environments,
-        step_context.mcp.as_ref(),
-        /*tool_suggest_candidates*/ None,
-        /*wait_for_environment_tool_config*/ None,
-    );
-    let hosted_specs = append_source_tools(
-        step_context.turn.as_ref(),
-        step_context.turn.model_info(),
-        &mut registry,
-        mcp_tools,
-        dynamic_tools,
-    );
+    let mut registry = ToolRegistry::default();
+    for tool in mcp_tools {
+        registry.register_external_with_exposure(tool.runtime, tool.exposure);
+    }
+    append_dynamic_tool_runtimes(dynamic_tools, &mut registry);
     ToolRouter::from_registry(
         step_context.turn.as_ref(),
         step_context.turn.model_info(),
         registry,
-        hosted_specs,
+        Vec::new(),
         &Default::default(),
     )
 }
 
 #[tokio::test]
-async fn parallel_support_does_not_match_namespaced_local_tool_names() -> anyhow::Result<()> {
+async fn dynamic_host_tool_does_not_register_native_or_namespaced_shadow() -> anyhow::Result<()> {
     let (_, turn) = make_session_and_context().await;
     let turn = Arc::new(turn);
     let step_context = StepContext::for_test(Arc::clone(&turn));
-    let router = test_tool_router(step_context.as_ref(), Vec::new(), &turn.dynamic_tools);
-
-    let parallel_tool_name = ["exec_command"]
-        .into_iter()
-        .find(|name| {
-            router.tool_supports_parallel(&ToolCall {
-                tool_name: ToolName::plain(*name),
-                call_id: "call-parallel-tool".to_string(),
-                payload: ToolPayload::Function {
-                    arguments: "{}".to_string(),
-                },
-                encrypted_function_args: None,
-            })
-        })
-        .expect("test session should expose a parallel shell-like tool");
+    let host_tool = DynamicToolSpec::Function(DynamicToolFunctionSpec {
+        name: "exec_command".to_string(),
+        description: "Host-owned shell".to_string(),
+        input_schema: json!({"type": "object", "properties": {}}),
+        defer_loading: false,
+    });
+    let router = test_tool_router(step_context.as_ref(), Vec::new(), &[host_tool]);
 
     assert_eq!(
+        router.registered_tool_names_for_test(),
+        vec![ToolName::plain("exec_command").with_default_namespace()]
+    );
+    assert!(
         router
-            .tool_runtime(&ToolName::plain(parallel_tool_name))
-            .map(|runtime| runtime.tool_name()),
-        Some(ToolName::plain(parallel_tool_name))
+            .tool_runtime(&ToolName::plain("exec_command"))
+            .is_some()
+    );
+    assert!(
+        router
+            .tool_runtime(&ToolName::namespaced("mcp__server__", "exec_command"))
+            .is_none()
     );
 
     assert!(!router.tool_supports_parallel(&ToolCall {
-        tool_name: ToolName::namespaced("mcp__server__", parallel_tool_name),
+        tool_name: ToolName::namespaced("mcp__server__", "exec_command"),
         call_id: "call-namespaced-tool".to_string(),
         payload: ToolPayload::Function {
             arguments: "{}".to_string(),
@@ -371,9 +361,27 @@ async fn specs_filter_deferred_dynamic_tools() -> anyhow::Result<()> {
         namespace_function_names(&visible_specs, "codex_app"),
         vec![visible_tool.to_string()]
     );
+    assert_eq!(router.deferred_tool_namespaces(), BTreeMap::new());
     assert_eq!(
-        router.deferred_tool_namespaces(),
-        BTreeMap::from([("codex_app".to_string(), "Codex app tools.".to_string())])
+        router.registered_tool_names_for_test(),
+        vec![ToolName::namespaced("codex_app", visible_tool)]
+    );
+    assert!(
+        router
+            .tool_runtime(&ToolName::namespaced("codex_app", hidden_tool))
+            .is_none()
+    );
+
+    let mut direct_catalog = dynamic_tools.clone();
+    let DynamicToolSpec::Namespace(namespace) = &mut direct_catalog[0] else {
+        unreachable!("test catalog is namespaced")
+    };
+    let DynamicToolNamespaceTool::Function(hidden) = &mut namespace.tools[0];
+    hidden.defer_loading = false;
+    let direct_router = test_tool_router(step_context.as_ref(), Vec::new(), &direct_catalog);
+    assert_eq!(
+        namespace_function_names(&direct_router.model_visible_specs(), "codex_app"),
+        vec![hidden_tool.to_string(), visible_tool.to_string()]
     );
 
     let updated_router = test_tool_router(step_context.as_ref(), Vec::new(), &[]);

@@ -1148,7 +1148,10 @@ fn add_collaboration_tools(context: &CoreToolPlanContext<'_>, registry: &mut Too
 }
 
 #[instrument(level = "trace", skip_all, fields(dynamic_tool_count = dynamic_tools.len()))]
-fn append_dynamic_tool_runtimes(dynamic_tools: &[DynamicToolSpec], registry: &mut ToolRegistry) {
+pub(crate) fn append_dynamic_tool_runtimes(
+    dynamic_tools: &[DynamicToolSpec],
+    registry: &mut ToolRegistry,
+) {
     for spec in dynamic_tools {
         match spec {
             DynamicToolSpec::Function(tool) => {
