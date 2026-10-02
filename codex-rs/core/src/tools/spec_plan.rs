@@ -57,19 +57,7 @@ pub(crate) fn finalize_tool_router(
     }
     apply_direct_model_only_namespace_overrides(turn_context, &mut registry);
     let tool_mode = effective_tool_mode(turn_context, model_info);
-    let code_mode_enabled = matches!(tool_mode, ToolMode::CodeMode | ToolMode::CodeModeOnly);
-    if code_mode_enabled {
-        for tool_name in [
-            ToolName::plain(codex_code_mode::PUBLIC_TOOL_NAME),
-            ToolName::plain(codex_code_mode::WAIT_TOOL_NAME),
-        ] {
-            if registry.remove(&tool_name).is_some() {
-                registry.record_collision(tool_name);
-            }
-        }
-    }
-    let code_mode_tool_names =
-        register_code_mode_executors(turn_context, model_info, &mut registry);
+    let code_mode_tool_names = BTreeMap::new();
     let include_tool_namespaces_info = turn_context
         .config
         .tool_registry
