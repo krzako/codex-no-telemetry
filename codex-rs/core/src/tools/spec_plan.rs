@@ -31,7 +31,6 @@ use crate::tools::handlers::ToolSearchHandlerCache;
 use crate::tools::handlers::ViewImageHandler;
 use crate::tools::handlers::WaitForEnvironmentHandler;
 use crate::tools::handlers::WriteStdinHandler;
-use crate::tools::handlers::extension_tools::ExtensionToolAdapter;
 use crate::tools::handlers::multi_agents::CloseAgentHandler;
 use crate::tools::handlers::multi_agents::ResumeAgentHandler;
 use crate::tools::handlers::multi_agents::SendInputHandler;
@@ -60,29 +59,22 @@ use crate::tools::registry::ToolExposure;
 use crate::tools::registry::ToolRegistry;
 use crate::tools::router::ToolRouter;
 use crate::tools::tool_namespaces_info::collect_tool_namespaces_info;
-use codex_extension_api::ExtensionData;
 use codex_features::Feature;
 use codex_features::SleepToolMode;
-use codex_login::AuthManager;
 use codex_prompts::ResolvedModelMessages;
 use codex_protocol::DEFAULT_FUNCTION_NAMESPACE;
-use codex_protocol::account::PlanType;
-use codex_protocol::config_types::WebSearchMode;
 use codex_protocol::dynamic_tools::DynamicToolNamespaceTool;
 use codex_protocol::dynamic_tools::DynamicToolSpec;
 use codex_protocol::error::CodexErrorDetails;
 use codex_protocol::error::Result as CodexResult;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::openai_models::ConfigShellToolType;
-use codex_protocol::openai_models::InputModality;
 use codex_protocol::openai_models::ModelInfo;
 use codex_protocol::openai_models::ToolMode;
 use codex_protocol::protocol::MultiAgentVersion;
 use codex_tools::ResponsesApiNamespaceTool;
 use codex_tools::TOOL_SEARCH_TOOL_NAME;
-use codex_tools::ToolCall as ExtensionToolCall;
 use codex_tools::ToolEnvironmentMode;
-use codex_tools::ToolExecutor;
 use codex_tools::ToolName;
 use codex_tools::ToolSpec;
 use codex_tools::UnifiedExecShellMode;
@@ -95,9 +87,6 @@ use std::collections::BTreeMap;
 use std::collections::btree_map::Entry;
 use std::sync::Arc;
 use tracing::instrument;
-
-const IMAGE_GEN_NAMESPACE: &str = "image_gen";
-const IMAGEGEN_TOOL_NAME: &str = "imagegen";
 
 #[derive(Clone, Copy)]
 struct CoreToolPlanContext<'a> {
@@ -163,45 +152,13 @@ pub(crate) fn append_source_tools(
     model_info: &ModelInfo,
     registry: &mut ToolRegistry,
     mcp_tools: Vec<RegisteredTool>,
-    extension_tool_executors: impl IntoIterator<
-        Item = Arc<dyn for<'call> ToolExecutor<ExtensionToolCall<'call>>>,
-    >,
     dynamic_tools: &[DynamicToolSpec],
 ) -> Vec<ToolSpec> {
     for tool in mcp_tools {
         registry.register_external_with_exposure(tool.runtime, tool.exposure);
     }
-    let standalone_web_search_tool = append_extension_tool_executors(
-        turn_context,
-        model_info,
-        extension_tool_executors,
-        registry,
-    );
     append_dynamic_tool_runtimes(dynamic_tools, registry);
-    hosted_model_tool_specs(
-        turn_context,
-        model_info,
-        standalone_web_search_tool.as_slice(),
-    )
-}
-
-#[instrument(level = "trace", skip_all)]
-pub(crate) fn extension_tool_executors<'a>(
-    session: &'a Session,
-    step_store: &'a ExtensionData,
-) -> impl Iterator<Item = Arc<dyn for<'call> ToolExecutor<ExtensionToolCall<'call>>>> + 'a {
-    session
-        .services
-        .extensions
-        .tool_contributors()
-        .iter()
-        .flat_map(move |contributor| {
-            contributor.tools_for_step(
-                &session.services.session_extension_data,
-                &session.services.thread_extension_data,
-                step_store,
-            )
-        })
+    hosted_model_tool_specs(turn_context, model_info, &[])
 }
 
 #[instrument(level = "trace", skip_all)]
@@ -553,44 +510,6 @@ fn required_child_management_tool_names(
         tools.push(ToolName::new(namespace.map(str::to_owned), "wait_agent"));
     }
     tools
-}
-
-fn image_generation_available(turn_context: &TurnContext, model_info: &ModelInfo) -> bool {
-    if !turn_context
-        .config
-        .features
-        .get()
-        .enabled(Feature::ImageGeneration)
-    {
-        return false;
-    }
-
-    if turn_context
-        .auth_manager
-        .as_deref()
-        .and_then(AuthManager::auth_cached)
-        .and_then(|auth| auth.account_plan_type())
-        == Some(PlanType::Free)
-    {
-        return false;
-    }
-
-    let capabilities = turn_context.provider.capabilities();
-    if !capabilities.image_generation || !capabilities.namespace_tools {
-        return false;
-    }
-
-    if !model_info.input_modalities.contains(&InputModality::Image) {
-        return false;
-    }
-
-    let provider = turn_context.provider.info();
-    provider.uses_openai_actor_authorization()
-        || (provider.requires_openai_auth
-            && turn_context
-                .auth_manager
-                .as_deref()
-                .is_some_and(AuthManager::current_auth_uses_codex_backend))
 }
 
 fn wait_agent_timeout_options(turn_context: &TurnContext) -> WaitAgentTimeoutOptions {
@@ -1284,36 +1203,6 @@ fn append_tool_search_executor(
     };
     let handler = tool_search_handler_cache.get_or_build(registry, source_listing);
     registry.register_trusted(handler);
-}
-
-fn append_extension_tool_executors(
-    turn_context: &TurnContext,
-    model_info: &ModelInfo,
-    executors: impl IntoIterator<Item = Arc<dyn for<'call> ToolExecutor<ExtensionToolCall<'call>>>>,
-    registry: &mut ToolRegistry,
-) -> Option<ToolName> {
-    let standalone_web_search_enabled = standalone_web_search_enabled(turn_context, model_info);
-    let web_search_mode_on = turn_context.config.web_search_mode.value() != WebSearchMode::Disabled;
-    let mut standalone_web_search_tool = None;
-
-    for executor in executors {
-        let tool_name = executor.tool_name();
-        let is_standalone_web_search = tool_name == ToolName::namespaced("web", "run");
-        if is_standalone_web_search && (!standalone_web_search_enabled || !web_search_mode_on) {
-            continue;
-        }
-        if tool_name == ToolName::namespaced(IMAGE_GEN_NAMESPACE, IMAGEGEN_TOOL_NAME)
-            && !image_generation_available(turn_context, model_info)
-        {
-            continue;
-        }
-        let runtime = Arc::new(ExtensionToolAdapter::new(executor));
-        if registry.register_external(runtime) && is_standalone_web_search {
-            standalone_web_search_tool = Some(tool_name);
-        }
-    }
-
-    standalone_web_search_tool
 }
 
 fn compare_code_mode_tools(

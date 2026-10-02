@@ -1003,7 +1003,6 @@ pub(crate) fn tool_registry_for_test_step(
         step_context.turn.model_info(),
         &mut registry,
         Vec::new(),
-        Vec::new(),
         &step_context.turn.dynamic_tools,
     );
     (registry, hosted_specs)

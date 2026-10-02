@@ -1,7 +1,6 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use crate::config::Config;
 use crate::session::step_context::StepContext;
 use crate::session::tests::make_session_and_context;
 use crate::tools::context::ToolPayload;
@@ -11,38 +10,22 @@ use crate::tools::registry::RegisteredTool;
 use crate::tools::registry::ToolExposure;
 use crate::tools::spec_plan::append_source_tools;
 use crate::tools::spec_plan::build_core_tool_registry;
-use crate::tools::spec_plan::extension_tool_executors;
-use crate::turn_diff_tracker::TurnDiffTracker;
-use codex_extension_api::ExtensionData;
-use codex_extension_api::ExtensionRegistry;
-use codex_extension_api::ExtensionRegistryBuilder;
-use codex_extension_api::ResponsesApiTool;
-use codex_extension_api::ToolCall as ExtensionToolCall;
-use codex_extension_api::ToolExecutor;
 use codex_protocol::DEFAULT_FUNCTION_NAMESPACE;
 use codex_protocol::dynamic_tools::DynamicToolFunctionSpec;
 use codex_protocol::dynamic_tools::DynamicToolNamespaceSpec;
 use codex_protocol::dynamic_tools::DynamicToolNamespaceTool;
 use codex_protocol::dynamic_tools::DynamicToolSpec;
-use codex_protocol::models::ContentItem;
-use codex_protocol::models::FunctionCallOutputBody;
 use codex_protocol::models::ResponseItem;
-use codex_tools::ResponsesApiNamespace;
 use codex_tools::ResponsesApiNamespaceTool;
 use codex_tools::ToolName;
 use codex_tools::ToolSpec;
-use codex_tools::default_namespace_description;
-use core_test_support::responses::strip_response_item_ids_from_json;
 use pretty_assertions::assert_eq;
 use serde_json::json;
-use tokio_util::sync::CancellationToken;
 
 use super::ToolCall;
 use super::ToolCallSource;
 use super::ToolRouter;
 use super::tool_log_payload;
-
-struct ExtensionEchoContributor;
 
 #[test]
 fn tool_log_payload_redacts_plaintext_multi_agent_messages() {
@@ -59,82 +42,9 @@ fn tool_log_payload_redacts_plaintext_multi_agent_messages() {
     );
 }
 
-impl codex_extension_api::ToolContributor for ExtensionEchoContributor {
-    fn tools(
-        &self,
-        _session_store: &ExtensionData,
-        _thread_store: &ExtensionData,
-    ) -> Vec<Arc<dyn for<'call> ToolExecutor<ExtensionToolCall<'call>>>> {
-        vec![Arc::new(ExtensionEchoExecutor)]
-    }
-}
-
-struct ExtensionEchoExecutor;
-
-impl<'call> ToolExecutor<ExtensionToolCall<'call>> for ExtensionEchoExecutor {
-    fn tool_name(&self) -> ToolName {
-        ToolName::namespaced("extension/", "echo")
-    }
-
-    fn spec(&self) -> ToolSpec {
-        ToolSpec::Namespace(ResponsesApiNamespace {
-            name: "extension/".to_string(),
-            description: default_namespace_description("extension/"),
-            tools: vec![ResponsesApiNamespaceTool::Function(ResponsesApiTool {
-                name: "echo".to_string(),
-                description: "Echoes arguments through an extension tool.".to_string(),
-                strict: true,
-                parameters: codex_extension_api::parse_tool_input_schema(&json!({
-                    "type": "object",
-                    "properties": {
-                        "message": { "type": "string" },
-                    },
-                    "required": ["message"],
-                    "additionalProperties": false,
-                }))
-                .expect("extension schema should parse"),
-                output_schema: None,
-                defer_loading: None,
-            })],
-        })
-    }
-
-    fn handle<'a>(&'a self, call: ExtensionToolCall<'call>) -> codex_tools::ToolExecutorFuture<'a>
-    where
-        'call: 'a,
-    {
-        Box::pin(self.handle_call(call))
-    }
-}
-
-impl ExtensionEchoExecutor {
-    async fn handle_call(
-        &self,
-        call: ExtensionToolCall<'_>,
-    ) -> Result<Box<dyn codex_tools::ToolOutput>, codex_tools::FunctionCallError> {
-        let arguments: serde_json::Value =
-            serde_json::from_str(call.function_arguments()?).expect("test arguments should parse");
-        Ok(Box::new(codex_tools::JsonToolOutput::new(json!({
-            "arguments": arguments,
-            "callId": call.call_id,
-            "conversationHistory": call.conversation_history.items(),
-            "ok": true,
-        }))) as Box<dyn codex_tools::ToolOutput>)
-    }
-}
-
-fn extension_tool_test_registry() -> Arc<ExtensionRegistry<Config>> {
-    let mut builder = ExtensionRegistryBuilder::new();
-    builder.tool_contributor(Arc::new(ExtensionEchoContributor));
-    Arc::new(builder.build())
-}
-
 fn test_tool_router(
     step_context: &StepContext,
     mcp_tools: Vec<RegisteredTool>,
-    extension_tool_executors: impl IntoIterator<
-        Item = Arc<dyn for<'call> ToolExecutor<ExtensionToolCall<'call>>>,
-    >,
     dynamic_tools: &[DynamicToolSpec],
 ) -> ToolRouter {
     let mut registry = build_core_tool_registry(
@@ -150,7 +60,6 @@ fn test_tool_router(
         step_context.turn.model_info(),
         &mut registry,
         mcp_tools,
-        extension_tool_executors,
         dynamic_tools,
     );
     ToolRouter::from_registry(
@@ -167,12 +76,7 @@ async fn parallel_support_does_not_match_namespaced_local_tool_names() -> anyhow
     let (_, turn) = make_session_and_context().await;
     let turn = Arc::new(turn);
     let step_context = StepContext::for_test(Arc::clone(&turn));
-    let router = test_tool_router(
-        step_context.as_ref(),
-        Vec::new(),
-        Vec::new(),
-        &turn.dynamic_tools,
-    );
+    let router = test_tool_router(step_context.as_ref(), Vec::new(), &turn.dynamic_tools);
 
     let parallel_tool_name = ["exec_command"]
         .into_iter()
@@ -347,7 +251,6 @@ async fn mcp_parallel_support_uses_handler_data() -> anyhow::Result<()> {
                 ))
             },
         ],
-        Vec::new(),
         &turn.dynamic_tools,
     );
 
@@ -412,12 +315,7 @@ async fn tools_without_handlers_do_not_support_parallel() -> anyhow::Result<()> 
     let (_, turn) = make_session_and_context().await;
     let turn = Arc::new(turn);
     let step_context = StepContext::for_test(Arc::clone(&turn));
-    let router = test_tool_router(
-        step_context.as_ref(),
-        Vec::new(),
-        Vec::new(),
-        &turn.dynamic_tools,
-    );
+    let router = test_tool_router(step_context.as_ref(), Vec::new(), &turn.dynamic_tools);
 
     assert!(!router.tool_supports_parallel(&ToolCall {
         tool_name: ToolName::plain("web_search"),
@@ -465,12 +363,7 @@ async fn specs_filter_deferred_dynamic_tools() -> anyhow::Result<()> {
         ],
     })];
 
-    let router = test_tool_router(
-        step_context.as_ref(),
-        Vec::new(),
-        Vec::new(),
-        &dynamic_tools,
-    );
+    let router = test_tool_router(step_context.as_ref(), Vec::new(), &dynamic_tools);
     let visible_specs = router.model_visible_specs();
 
     assert!(Arc::ptr_eq(&visible_specs, &router.model_visible_specs()));
@@ -483,7 +376,7 @@ async fn specs_filter_deferred_dynamic_tools() -> anyhow::Result<()> {
         BTreeMap::from([("codex_app".to_string(), "Codex app tools.".to_string())])
     );
 
-    let updated_router = test_tool_router(step_context.as_ref(), Vec::new(), Vec::new(), &[]);
+    let updated_router = test_tool_router(step_context.as_ref(), Vec::new(), &[]);
     let updated_specs = updated_router.model_visible_specs();
     assert!(!Arc::ptr_eq(&visible_specs, &updated_specs));
     assert!(namespace_function_names(&updated_specs, "codex_app").is_empty());
@@ -525,106 +418,6 @@ fn mcp_runtime(tool_info: codex_mcp::ToolInfo) -> RegisteredTool {
         exposure: runtime.exposure(),
         runtime,
     }
-}
-
-#[tokio::test]
-async fn extension_tool_executors_are_model_visible_and_dispatchable() -> anyhow::Result<()> {
-    let (mut session, turn) = make_session_and_context().await;
-    session.services.extensions = extension_tool_test_registry();
-    let turn = Arc::new(turn);
-    let step_context = StepContext::for_test(Arc::clone(&turn));
-    let history_item = ResponseItem::Message {
-        id: None,
-        role: "user".to_string(),
-        content: vec![ContentItem::InputText {
-            text: "extension history".to_string(),
-        }],
-        phase: None,
-        internal_chat_message_metadata_passthrough: None,
-    };
-    session
-        .record_conversation_items(
-            &turn,
-            turn.model_info(),
-            std::slice::from_ref(&history_item),
-        )
-        .await;
-    let expected_history_item = session
-        .clone_history()
-        .await
-        .raw_items()
-        .next()
-        .expect("history item")
-        .clone();
-
-    let router = test_tool_router(
-        step_context.as_ref(),
-        Vec::new(),
-        extension_tool_executors(
-            &session,
-            &codex_extension_api::ExtensionData::new(turn.sub_id.clone()),
-        ),
-        &turn.dynamic_tools,
-    );
-
-    assert!(
-        router.model_visible_specs().iter().any(
-            |spec| matches!(spec, ToolSpec::Namespace(namespace)
-            if namespace.name == "extension/"
-                && namespace.tools.iter().any(|tool| matches!(
-                    tool,
-                    ResponsesApiNamespaceTool::Function(tool) if tool.name == "echo"
-                )))
-        ),
-        "expected extension-provided tool to be visible to the model"
-    );
-
-    let call = ToolRouter::build_tool_call(ResponseItem::FunctionCall {
-        id: None,
-        name: "echo".to_string(),
-        namespace: Some("extension/".to_string()),
-        arguments: json!({ "message": "hello" }).to_string(),
-        call_id: "call-extension".to_string(),
-        encrypted_function_args: None,
-        internal_chat_message_metadata_passthrough: None,
-    })?
-    .expect("function_call should produce a tool call");
-    let result = router
-        .dispatch_tool_call_with_code_mode_result(
-            Arc::new(session),
-            step_context,
-            CancellationToken::new(),
-            Arc::new(tokio::sync::Mutex::new(TurnDiffTracker::new())),
-            call,
-            ToolCallSource::Direct,
-        )
-        .await?;
-
-    let response = result.into_response().item;
-    match response {
-        ResponseItem::FunctionCallOutput {
-            call_id, output, ..
-        } => {
-            assert_eq!(call_id.as_deref(), Some("call-extension"));
-            let FunctionCallOutputBody::Text(text) = output.body else {
-                panic!("expected text function call output")
-            };
-            let value: serde_json::Value =
-                serde_json::from_str(&text).expect("extension tool output should be json");
-            assert_eq!(
-                strip_response_item_ids_from_json(value),
-                strip_response_item_ids_from_json(json!({
-                    "arguments": { "message": "hello" },
-                    "callId": "call-extension",
-                    "conversationHistory": [expected_history_item],
-                    "ok": true,
-                }))
-            );
-        }
-        other => panic!("expected function call output, got {other:?}"),
-    }
-
-    Ok(())
 }
 
 fn namespace_function_names(specs: &[ToolSpec], namespace_name: &str) -> Vec<String> {
