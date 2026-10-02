@@ -30,7 +30,6 @@ use crate::session::step_context::StepContext;
 use crate::tools::ExecutedToolCalls;
 use crate::tools::call_trace;
 use crate::tools::context::FunctionToolOutput;
-use crate::tools::context::SharedTurnDiffTracker;
 use crate::tools::context::ToolPayload;
 use crate::tools::parallel::ToolCallRuntime;
 use crate::tools::router::ToolCall;
@@ -45,7 +44,6 @@ use codex_utils_output_truncation::truncate_function_output_items_with_policy;
 
 use delegate::CodeModeCellDelegate;
 use delegate::CodeModeDispatchBroker;
-use delegate::CodeModeDispatchWorker;
 use output::CodeModeToolOutput;
 use response_adapter::into_function_call_output_content_items;
 
@@ -192,22 +190,6 @@ impl CodeModeService {
 
     pub(crate) fn finish_cell_dispatch(&self, cell_id: &CellId) {
         self.dispatch_broker.close_cell(cell_id);
-    }
-
-    pub(crate) fn start_turn_worker(
-        &self,
-        session: &Arc<Session>,
-        step_context: Arc<StepContext>,
-        tracker: SharedTurnDiffTracker,
-    ) -> Option<CodeModeDispatchWorker> {
-        if !step_context.tool_router.requires_code_mode_worker() {
-            return None;
-        }
-
-        Some(
-            self.dispatch_broker
-                .start_turn_worker(Arc::clone(session), step_context, tracker),
-        )
     }
 
     pub(crate) async fn session(&self) -> Result<Arc<dyn CodeModeSession>, String> {
@@ -437,51 +419,13 @@ fn build_freeform_tool_payload(
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
-    use std::sync::Arc;
-
     use super::build_nested_tool_payload;
     use super::truncate_code_mode_result;
-    use crate::session::step_context::StepContext;
-    use crate::session::tests::make_session_and_context;
     use crate::tools::context::ToolPayload;
-    use crate::tools::registry::ToolRegistry;
-    use crate::tools::router::ToolRouter;
-    use crate::turn_diff_tracker::TurnDiffTracker;
     use codex_code_mode::CodeModeToolKind;
     use codex_protocol::models::FunctionCallOutputContentItem;
-    use codex_protocol::openai_models::ToolMode;
     use codex_tools::ToolName;
     use serde_json::json;
-
-    #[tokio::test]
-    async fn turn_worker_uses_step_router_mode_instead_of_admitted_turn() {
-        let (session, turn) = make_session_and_context().await;
-        assert_eq!(
-            crate::tools::effective_tool_mode(&turn, turn.model_info()),
-            ToolMode::Direct
-        );
-        let session = Arc::new(session);
-        let step_context = StepContext::for_test(Arc::new(turn));
-        let router = Arc::new(ToolRouter::from_parts(
-            ToolRegistry::empty_for_test(),
-            Vec::new(),
-            ToolMode::CodeModeOnly,
-            BTreeMap::new(),
-            /*tool_namespaces_info*/ None,
-            &[],
-        ));
-        let step_context = step_context.with_tool_router_for_test(router);
-        let tracker = Arc::new(tokio::sync::Mutex::new(TurnDiffTracker::new()));
-
-        let worker =
-            session
-                .services
-                .code_mode_service
-                .start_turn_worker(&session, step_context, tracker);
-
-        assert!(worker.is_some());
-    }
 
     #[test]
     fn build_nested_tool_payload_uses_function_kind() {

@@ -133,11 +133,6 @@ impl ToolRouter {
         self.tool_mode
     }
 
-    /// Code Mode still needs its dispatcher when the nested tool set is empty.
-    pub(crate) fn requires_code_mode_worker(&self) -> bool {
-        matches!(self.tool_mode, ToolMode::CodeMode | ToolMode::CodeModeOnly)
-    }
-
     /// The normalized nested identities chosen after exclusions and collisions.
     // Consumed by the follow-up cell-origin migration.
     #[cfg_attr(not(test), allow(dead_code))]
