@@ -60,12 +60,10 @@ use crate::tools::registry::ToolExposure;
 use crate::tools::registry::ToolRegistry;
 use crate::tools::router::ToolRouter;
 use crate::tools::tool_namespaces_info::collect_tool_namespaces_info;
-use codex_connectors::apps_config_from_layer_stack;
 use codex_extension_api::ExtensionData;
 use codex_features::Feature;
 use codex_features::SleepToolMode;
 use codex_login::AuthManager;
-use codex_mcp::CODEX_APPS_MCP_SERVER_NAME;
 use codex_prompts::ResolvedModelMessages;
 use codex_protocol::DEFAULT_FUNCTION_NAMESPACE;
 use codex_protocol::account::PlanType;
@@ -85,7 +83,6 @@ use codex_tools::TOOL_SEARCH_TOOL_NAME;
 use codex_tools::ToolCall as ExtensionToolCall;
 use codex_tools::ToolEnvironmentMode;
 use codex_tools::ToolExecutor;
-use codex_tools::ToolExposures;
 use codex_tools::ToolName;
 use codex_tools::ToolSpec;
 use codex_tools::UnifiedExecShellMode;
@@ -95,8 +92,6 @@ use codex_tools::collect_request_plugin_install_entries;
 use codex_tools::default_namespace_description;
 use codex_tools::request_user_input_available_modes;
 use std::collections::BTreeMap;
-use std::collections::HashMap;
-use std::collections::HashSet;
 use std::collections::btree_map::Entry;
 use std::sync::Arc;
 use tracing::instrument;
@@ -132,88 +127,6 @@ pub(crate) fn build_tool_router(
         Vec::new(),
         &session.services.tool_search_handler_cache,
     )
-}
-
-fn apply_mcp_tool_exposure_policy(
-    turn_context: &TurnContext,
-    model_info: &ModelInfo,
-    mcp: &codex_mcp::McpBinding,
-    registered_mcp_tools: &HashSet<ToolName>,
-    registry: &mut ToolRegistry,
-) {
-    let mut omitted_exposures_by_tool = HashMap::new();
-    let apps_config = apps_config_from_layer_stack(&turn_context.config.config_layer_stack);
-    for tool in mcp.tools() {
-        let tool_name = tool.canonical_tool_name();
-        if !registered_mcp_tools.contains(&tool_name) {
-            continue;
-        }
-        let Some(server) = mcp.config().mcp_server_catalog.server(&tool.server_name) else {
-            continue;
-        };
-        omitted_exposures_by_tool
-            .entry(tool_name)
-            .or_insert_with(|| {
-                let connector_omissions = (tool.server_name == CODEX_APPS_MCP_SERVER_NAME)
-                    .then_some(tool.connector_id.as_deref())
-                    .flatten()
-                    .and_then(|id| apps_config.as_ref()?.apps.get(id))
-                    .and_then(|app| app.omit_tools_from.as_deref())
-                    .unwrap_or_default();
-                server
-                    .config()
-                    .omit_tools_from
-                    .as_deref()
-                    .unwrap_or_default()
-                    .iter()
-                    .chain(connector_omissions)
-                    .copied()
-                    .collect::<ToolExposures>()
-            });
-    }
-
-    for tool in registry.entries_mut() {
-        let tool_name = tool.runtime.tool_name();
-        let Some(omitted_exposures) = omitted_exposures_by_tool.get(&tool_name) else {
-            continue;
-        };
-        let tool_name = tool_name.with_default_namespace();
-
-        let mut exposures = ToolExposures::ALL.difference(*omitted_exposures);
-        if tool_name.namespace.as_ref().is_some_and(|namespace| {
-            turn_context
-                .config
-                .code_mode
-                .direct_only_tool_namespaces
-                .contains(namespace)
-        }) {
-            exposures = exposures.difference(ToolExposures::DEFERRED | ToolExposures::CODE_MODE);
-        }
-
-        exposures = if search_tool_enabled(turn_context, model_info)
-            && exposures.contains(ToolExposures::DEFERRED)
-            && (effective_tool_mode(turn_context, model_info) != ToolMode::CodeModeOnly
-                || exposures.contains(ToolExposures::CODE_MODE))
-        {
-            exposures.difference(ToolExposures::DIRECT)
-        } else {
-            exposures.difference(ToolExposures::DEFERRED)
-        };
-
-        tool.exposure = match (
-            exposures.contains(ToolExposures::DIRECT),
-            exposures.contains(ToolExposures::DEFERRED),
-            exposures.contains(ToolExposures::CODE_MODE),
-        ) {
-            (false, false, false) => ToolExposure::Hidden,
-            (false, false, true) => ToolExposure::CodeModeOnly,
-            (true, false, false) => ToolExposure::DirectModelOnly,
-            (true, false, true) => ToolExposure::Direct,
-            (false, true, false) => ToolExposure::DeferredModelOnly,
-            (false, true, true) => ToolExposure::Deferred,
-            (true, true, _) => unreachable!("direct and deferred exposure are mutually exclusive"),
-        };
-    }
 }
 
 #[cfg(test)]
