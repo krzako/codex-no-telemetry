@@ -172,6 +172,8 @@ pub struct TurnStartOptions {
     pub dynamic_tools: Option<Vec<DynamicToolSpec>>,
     /// An external host owns the whole tool surface for this turn.
     pub delegated_tools_only: bool,
+    /// Start-only key for a DSH audit binding supplied by the app-server host.
+    pub dsh_audit_turn: Option<u64>,
     /// Service tier for a new turn, without changing the thread's preference.
     pub service_tier: Option<String>,
     /// Parent turn lineage recorded if this request starts a new turn.

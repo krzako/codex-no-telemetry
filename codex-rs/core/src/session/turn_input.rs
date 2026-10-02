@@ -133,6 +133,7 @@ impl PreparedTurnInputSettings {
             final_output_json_schema,
             dynamic_tools,
             delegated_tools_only,
+            dsh_audit_turn,
             service_tier,
             parent_turn_id,
             root_turn_id,
@@ -147,11 +148,29 @@ impl PreparedTurnInputSettings {
         let mut updates = self.thread_settings_update.unwrap_or_default();
         updates.service_tier_for_turn = service_tier;
 
+        let dsh_audit = if let Some(turn) = dsh_audit_turn {
+            Some(
+                session
+                    .services
+                    .thread_extension_data
+                    .get::<crate::dsh_audit::DshAuditBindingRegistry>()
+                    .and_then(|registry| registry.take(turn))
+                    .ok_or_else(|| {
+                        CodexErr::InvalidRequest(format!(
+                            "DSH audit binding is missing for turn {turn}"
+                        ))
+                    })?,
+            )
+        } else {
+            None
+        };
+
         let options = NewTurnContextOptions {
             final_output_json_schema,
             dynamic_tools,
             delegated_tools_only,
             cyber_access_program,
+            dsh_audit,
         };
         let turn_context = match kind {
             TurnStartKind::User | TurnStartKind::Recovery => Some(

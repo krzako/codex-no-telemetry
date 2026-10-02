@@ -300,6 +300,7 @@ pub(crate) struct NewTurnContextOptions {
     pub(crate) dynamic_tools: Option<Vec<DynamicToolSpec>>,
     pub(crate) delegated_tools_only: bool,
     pub(crate) cyber_access_program: Option<CyberAccessProgram>,
+    pub(crate) dsh_audit: Option<Arc<crate::dsh_audit::DshAuditBinding>>,
 }
 
 /// The context needed for a single turn of the thread.
@@ -1291,6 +1292,9 @@ impl Session {
             turn_context.dynamic_tools = dynamic_tools;
         }
         turn_context.delegated_tools_only |= options.delegated_tools_only;
+        if let Some(dsh_audit) = options.dsh_audit {
+            turn_context.extension_data.insert(dsh_audit);
+        }
         if turn_context.config.model_provider_id == codex_model_provider_info::OPENAI_PROVIDER_ID {
             turn_context.cyber_access_program = options.cyber_access_program;
         }

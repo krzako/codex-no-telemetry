@@ -4,6 +4,8 @@ use codex_agent_extension::AgentInvocation;
 use codex_agent_extension::AgentRun;
 use codex_agent_extension::AgentRunner;
 use codex_app_server_protocol::ImageReference as V2ImageReference;
+use codex_core::DshAuditBinding;
+use codex_core::DshAuditBindingRegistry;
 use codex_protocol::error::CodexErrorDetails;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::FunctionCallOutputBody;
@@ -665,7 +667,7 @@ impl TurnRequestProcessor {
             )
             .await?;
 
-        if is_dsh_client {
+        let dsh_audit_registry = if is_dsh_client {
             let audit_turn =
                 audit_turn.ok_or_else(|| invalid_request("DSH turn requires dshAudit"))?;
             if audit_turn.session_id.is_empty() || audit_turn.turn == 0 {
@@ -677,13 +679,34 @@ impl TurnRequestProcessor {
                 .before_turn(&request_id, thread_id, &audit_turn, audit_config)
                 .await
                 .map_err(|err| internal_error(format!("DSH audit preflight failed: {err}")))?;
+            let registry = thread
+                .thread_extension_data()
+                .get_or_init(DshAuditBindingRegistry::default);
+            let audit = Arc::clone(&self.dsh_audit);
+            let audit_request_id = request_id.clone();
+            registry
+                .insert(DshAuditBinding::new(
+                    audit_turn.session_id,
+                    audit_turn.turn,
+                    move |fact| {
+                        let audit = Arc::clone(&audit);
+                        let request_id = audit_request_id.clone();
+                        Box::pin(
+                            async move { audit.append_fact(&request_id, thread_id, fact).await },
+                        )
+                    },
+                ))
+                .map_err(|err| internal_error(format!("DSH audit binding failed: {err}")))?;
+            Some((registry, audit_turn.turn))
         } else if audit_turn.is_some() {
             return Err(invalid_request(
                 "dshAudit requires the DSH app-server client",
             ));
-        }
+        } else {
+            None
+        };
 
-        let submission = thread
+        let submission_result = thread
             .start_or_steer_turn(
                 TurnInputRequest::new(input)
                     .with_thread_settings(thread_settings)
@@ -691,6 +714,7 @@ impl TurnRequestProcessor {
                         turn_trigger: params.turn_trigger,
                         final_output_json_schema: params.output_schema,
                         delegated_tools_only: params.dynamic_tools.is_some(),
+                        dsh_audit_turn: dsh_audit_registry.as_ref().map(|(_, turn)| *turn),
                         dynamic_tools: params.dynamic_tools,
                         service_tier: params.service_tier_for_turn,
                         cyber_access_program: params.cyber_access_program.map(Into::into),
@@ -700,12 +724,15 @@ impl TurnRequestProcessor {
                     .with_responses_metadata(params.responsesapi_client_metadata)
                     .with_trace(self.request_trace_context(&request_id).await),
             )
-            .await
-            .map_err(|err| {
-                let error = internal_error(format!("failed to submit turn input: {err}"));
-                self.track_error_response(&request_id, &error, /*error_type*/ None);
-                error
-            })?;
+            .await;
+        if let Some((registry, turn)) = dsh_audit_registry {
+            registry.take(turn);
+        }
+        let submission = submission_result.map_err(|err| {
+            let error = internal_error(format!("failed to submit turn input: {err}"));
+            self.track_error_response(&request_id, &error, /*error_type*/ None);
+            error
+        })?;
         let (turn_id, started) = match submission {
             TurnInputSubmission::Started { turn_id } => (turn_id, true),
             TurnInputSubmission::Steered { turn_id } => (turn_id, false),

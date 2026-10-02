@@ -1,5 +1,7 @@
 use super::*;
 use crate::config::Constrained;
+use crate::dsh_audit::DshAuditBinding;
+use crate::dsh_audit::DshAuditBindingRegistry;
 use crate::session::step_settings::StepSettingsUpdate;
 use crate::session::tests::make_session_and_context;
 use crate::session::tests::make_session_and_context_with_rx;
@@ -106,6 +108,58 @@ async fn submit_steer_only(
     )
     .await
     .expect("steer-only submission should be valid")
+}
+
+#[tokio::test]
+async fn dsh_audit_binding_is_frozen_into_only_its_started_turn() {
+    let (session, _context, _rx) = make_session_and_context_with_rx().await;
+    let registry = session
+        .services
+        .thread_extension_data
+        .get_or_init(DshAuditBindingRegistry::default);
+    registry
+        .insert(DshAuditBinding::new("dsh-session".to_string(), 7, |_| {
+            Box::pin(async { Ok(()) })
+        }))
+        .expect("register DSH audit binding");
+    let first = PreparedTurnInputSettings::prepare(
+        &session,
+        ThreadSettingsOverrides::default(),
+        TurnStartOptions {
+            dsh_audit_turn: Some(7),
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("prepare first turn")
+    .apply_started(&session, "first".to_string(), TurnStartKind::User)
+    .await
+    .expect("start first turn")
+    .expect("admitted first turn");
+    let binding = first
+        .extension_data
+        .get::<Arc<DshAuditBinding>>()
+        .expect("first turn owns binding");
+    assert_eq!(binding.session_id(), "dsh-session");
+    assert!(registry.take(7).is_none());
+
+    let second = PreparedTurnInputSettings::prepare(
+        &session,
+        ThreadSettingsOverrides::default(),
+        TurnStartOptions::default(),
+    )
+    .await
+    .expect("prepare second turn")
+    .apply_started(&session, "second".to_string(), TurnStartKind::User)
+    .await
+    .expect("start second turn")
+    .expect("admitted second turn");
+    assert!(
+        second
+            .extension_data
+            .get::<Arc<DshAuditBinding>>()
+            .is_none()
+    );
 }
 
 #[tokio::test]

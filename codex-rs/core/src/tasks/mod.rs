@@ -500,6 +500,7 @@ impl Session {
                     dynamic_tools: start_options.dynamic_tools,
                     delegated_tools_only: start_options.delegated_tools_only,
                     cyber_access_program: start_options.cyber_access_program,
+                    dsh_audit: None,
                 },
             )
             .await;
