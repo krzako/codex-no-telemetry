@@ -127,6 +127,34 @@ pub(super) async fn run_remote_compact_v2_attempt(
             .as_ref()
             .map(|output| std::slice::from_ref(&output.compaction_output)),
     );
+    match &compaction_output_result {
+        Ok(output) => {
+            compaction_audit::record_result(
+                turn_context.dsh_audit_binding(),
+                compaction_id,
+                serde_json::json!({
+                    "model": turn_context.model_info().slug,
+                    "metadata": compaction_metadata,
+                    "responseId": output.response_id,
+                    "outputItems": [&output.compaction_output],
+                    "tokenUsage": output.token_usage,
+                }),
+            )
+            .await?;
+        }
+        Err(error) => {
+            compaction_audit::record_failure(
+                turn_context.dsh_audit_binding(),
+                compaction_id,
+                &error.to_string(),
+                serde_json::json!({
+                    "model": turn_context.model_info().slug,
+                    "metadata": compaction_metadata,
+                }),
+            )
+            .await?;
+        }
+    }
     let RemoteCompactionV2Output {
         compaction_output,
         response_id,

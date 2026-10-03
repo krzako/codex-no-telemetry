@@ -313,6 +313,35 @@ async fn run_compact_task_inner_impl(
         )
         .await;
 
+        match &attempt_result {
+            Ok(response) => {
+                compaction_audit::record_result(
+                    turn_context.dsh_audit_binding(),
+                    compaction_id.as_str(),
+                    serde_json::json!({
+                        "model": turn_context.model_info().slug,
+                        "metadata": compaction_metadata,
+                        "responseId": response.response_id,
+                        "outputItems": response.output,
+                    }),
+                )
+                .await?;
+            }
+            Err(error) => {
+                compaction_audit::record_failure(
+                    turn_context.dsh_audit_binding(),
+                    compaction_id.as_str(),
+                    &error.to_string(),
+                    serde_json::json!({
+                        "model": turn_context.model_info().slug,
+                        "metadata": compaction_metadata,
+                        "retry": retries,
+                    }),
+                )
+                .await?;
+            }
+        }
+
         match attempt_result {
             Ok(response) => {
                 break response;
@@ -818,11 +847,10 @@ async fn drain_to_completed(
         };
         match event {
             Ok(ResponseEvent::OutputItemDone(item)) => {
-                if matches!(phase, CompactionPhase::PostTurn) {
-                    // Commit post-turn summaries only after success; failures must leave both
-                    // the live history and persisted rollout intact.
-                    output.push(item);
-                } else {
+                output.push(item.clone());
+                // Commit post-turn summaries only after success; failures must leave both
+                // the live history and persisted rollout intact.
+                if !matches!(phase, CompactionPhase::PostTurn) {
                     sess.record_conversation_items(
                         turn_context,
                         turn_context.model_info(),
