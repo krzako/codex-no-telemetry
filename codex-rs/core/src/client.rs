@@ -1025,7 +1025,8 @@ impl ModelClient {
     ///
     /// WebSocket use is controlled by provider capability and session-scoped fallback state.
     pub fn responses_websocket_enabled(&self) -> bool {
-        if !self.state.provider.info().supports_websockets
+        if self.state.provider.info().name == DSH_GATEWAY_PROVIDER_NAME
+            || !self.state.provider.info().supports_websockets
             || self.state.disable_websockets.load(Ordering::Relaxed)
         {
             return false;
@@ -1050,7 +1051,7 @@ impl ModelClient {
         loop {
             let revision = auth_changes.as_ref().map(|changes| *changes.borrow());
             let auth = self.state.provider.auth().await;
-            let (api_provider, redirect_policy) = match routing {
+            let (mut api_provider, redirect_policy) = match routing {
                 ClientRouting::Workspace => {
                     let resolved = self
                         .state
@@ -1064,6 +1065,11 @@ impl ModelClient {
                     ClientRedirectPolicy::Default,
                 ),
             };
+            if self.state.provider.info().name == DSH_GATEWAY_PROVIDER_NAME {
+                // One DSH model attempt ID must represent one physical request.
+                // The Codex sampling loop owns retries and issues a fresh ID.
+                api_provider.retry.max_attempts = 0;
+            }
             let resolved_auth = self
                 .state
                 .provider

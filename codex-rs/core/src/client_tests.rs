@@ -1693,6 +1693,7 @@ async fn dsh_http_transport_failure_uses_the_audited_attempt_id() -> anyhow::Res
         .respond_with(ResponseTemplate::new(503).set_body_json(json!({
             "error": { "message": "upstream unavailable" },
         })))
+        .expect(1)
         .mount(&server)
         .await;
     let mut provider =
@@ -1745,6 +1746,18 @@ async fn dsh_http_transport_failure_uses_the_audited_attempt_id() -> anyhow::Res
     assert_eq!(facts[1]["code"], "transport");
     assert_eq!(facts[0]["attemptId"], facts[1]["attemptId"]);
     Ok(())
+}
+
+#[test]
+fn dsh_gateway_never_uses_unimplemented_websocket_transport() {
+    let mut provider = ModelProviderInfo::create_openai_provider(None);
+    provider.name = DSH_GATEWAY_PROVIDER_NAME.to_string();
+    provider.supports_websockets = true;
+    let mut client = test_model_client(SessionSource::Cli);
+    Arc::get_mut(&mut client.state)
+        .expect("unique test client")
+        .provider = create_model_provider(provider, None);
+    assert!(!client.responses_websocket_enabled());
 }
 
 #[tokio::test]
