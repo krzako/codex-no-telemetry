@@ -127,6 +127,7 @@ use crate::context::BaseInstructionsFragment;
 use crate::context::ContextualUserFragment;
 use crate::cyber_access_program;
 use crate::dsh_audit::DshAuditBinding;
+use crate::dsh_audit::DshModelAttempt;
 use crate::feedback_tags;
 use crate::responses_metadata::CodexResponsesMetadata;
 use crate::responses_metadata::CodexResponsesRequestKind;
@@ -1361,9 +1362,9 @@ impl ModelClientSession {
         headers: &ApiHeaderMap,
         request: &ResponsesApiRequest,
         responses_metadata: &CodexResponsesMetadata,
-    ) -> Result<()> {
+    ) -> Result<Option<DshModelAttempt>> {
         if self.client.state.provider.info().name != DSH_GATEWAY_PROVIDER_NAME {
-            return Ok(());
+            return Ok(None);
         }
         let binding = self.dsh_audit.as_ref().ok_or_else(|| {
             CodexErr::Fatal("DSH model request has no required audit binding".to_string())
@@ -1386,7 +1387,12 @@ impl ModelClientSession {
         binding
             .model_request(attempt_id, purpose, request)
             .await
-            .map_err(|error| CodexErr::Fatal(format!("DSH model audit failed: {error}")))
+            .map_err(|error| CodexErr::Fatal(format!("DSH model audit failed: {error}")))?;
+        Ok(Some(DshModelAttempt::new(
+            Arc::clone(binding),
+            attempt_id.to_string(),
+            purpose,
+        )))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1757,7 +1763,8 @@ impl ModelClientSession {
             let request_session_telemetry =
                 session_telemetry_for_request(session_telemetry, &request);
             options.extra_headers.extend(responses_headers);
-            self.audit_model_request(&options.extra_headers, &request, responses_metadata)
+            let dsh_attempt = self
+                .audit_model_request(&options.extra_headers, &request, responses_metadata)
                 .await?;
             let inference_trace_attempt = inference_trace.start_attempt();
             inference_trace_attempt.add_request_headers(&mut options.extra_headers);
@@ -1777,6 +1784,7 @@ impl ModelClientSession {
                         request_session_telemetry,
                         inference_trace_attempt,
                         Arc::clone(&self.client.state.provider),
+                        dsh_attempt,
                     );
                     return Ok(stream);
                 }
@@ -2034,10 +2042,12 @@ impl ModelClientSession {
             );
             let mut ws_request = ResponsesWsRequest::ResponseCreate(ws_payload);
             stamp_ws_stream_request_start_ms(&mut ws_request);
-            if !warmup {
+            let dsh_attempt = if warmup {
+                None
+            } else {
                 self.audit_model_request(&responses_headers, &request, responses_metadata)
-                    .await?;
-            }
+                    .await?
+            };
             if !previous_response_id_from_untraced_warmup {
                 inference_trace_attempt.record_started(&ws_request);
             }
@@ -2086,6 +2096,7 @@ impl ModelClientSession {
                 request_session_telemetry,
                 inference_trace_attempt,
                 Arc::clone(&self.client.state.provider),
+                dsh_attempt,
             );
             self.websocket_session.last_response_rx = Some(last_request_rx);
             return Ok(WebsocketStreamOutcome::Stream(stream));
@@ -2319,6 +2330,7 @@ fn map_response_stream(
     session_telemetry: SessionTelemetry,
     inference_trace_attempt: InferenceTraceAttempt,
     provider: SharedModelProvider,
+    dsh_attempt: Option<DshModelAttempt>,
 ) -> (ResponseStream, oneshot::Receiver<LastResponse>) {
     let codex_api::ResponseStream {
         rx_event,
@@ -2334,6 +2346,7 @@ fn map_response_stream(
         session_telemetry,
         inference_trace_attempt,
         provider,
+        dsh_attempt,
     )
 }
 
@@ -2343,6 +2356,7 @@ fn map_response_events<S>(
     session_telemetry: SessionTelemetry,
     inference_trace_attempt: InferenceTraceAttempt,
     provider: SharedModelProvider,
+    dsh_attempt: Option<DshModelAttempt>,
 ) -> (ResponseStream, oneshot::Receiver<LastResponse>)
 where
     S: futures::Stream<Item = std::result::Result<ResponseEvent, ApiError>>
@@ -2362,6 +2376,7 @@ where
         let mut items_added: Vec<ResponseItem> = Vec::new();
         let (request_start, mut ttft_ms) = (Instant::now(), None);
         let mut api_stream = api_stream;
+        let mut dsh_attempt = dsh_attempt;
         let upstream_request_id = upstream_request_id.as_deref();
         if let Some(upstream_request_id) = upstream_request_id {
             feedback_tags!(last_model_request_id = upstream_request_id);
@@ -2381,6 +2396,23 @@ where
             let Some(event) = event else {
                 break;
             };
+            if let Some(attempt) = dsh_attempt.as_mut() {
+                let audit_result = match &event {
+                    Ok(value @ ResponseEvent::Completed { .. }) => {
+                        attempt.completed(value, &items_added).await
+                    }
+                    Ok(value) => attempt.stream_event(value).await,
+                    Err(_) => Ok(()),
+                };
+                if let Err(error) = audit_result {
+                    let _ = tx_event
+                        .send(Err(CodexErr::Fatal(format!(
+                            "DSH model audit failed: {error}"
+                        ))))
+                        .await;
+                    return;
+                }
+            }
             match event {
                 Ok(ResponseEvent::OutputItemDone(item)) => {
                     items_added.push(item.clone());

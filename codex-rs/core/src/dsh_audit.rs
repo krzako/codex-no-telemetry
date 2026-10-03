@@ -6,6 +6,8 @@ use std::sync::Mutex;
 use std::sync::PoisonError;
 
 use anyhow::Result;
+use codex_api::ResponseEvent;
+use codex_protocol::models::ResponseItem;
 use futures::future::BoxFuture;
 use serde_json::Value;
 use serde_json::json;
@@ -72,6 +74,71 @@ impl DshAuditBinding {
             "request": { "kind": "inline", "value": request },
         }))
         .await
+    }
+}
+
+/// Ordered parsed response facts for one already-audited model request.
+#[derive(Debug)]
+pub(crate) struct DshModelAttempt {
+    binding: Arc<DshAuditBinding>,
+    attempt_id: String,
+    purpose: &'static str,
+    next_index: u64,
+}
+
+impl DshModelAttempt {
+    pub(crate) fn new(
+        binding: Arc<DshAuditBinding>,
+        attempt_id: String,
+        purpose: &'static str,
+    ) -> Self {
+        Self {
+            binding,
+            attempt_id,
+            purpose,
+            next_index: 0,
+        }
+    }
+
+    pub(crate) async fn stream_event(&mut self, event: &ResponseEvent) -> Result<()> {
+        let index = self.next_index;
+        let chunk = serde_json::to_value(event)?;
+        self.binding
+            .append(json!({
+                "eventId": format!("dsh-model-stream-{}-{index}", self.attempt_id),
+                "turn": self.binding.turn,
+                "kind": "model/stream",
+                "attemptId": &self.attempt_id,
+                "purpose": self.purpose,
+                "stage": "codex",
+                "index": index,
+                "chunk": { "kind": "inline", "value": chunk },
+            }))
+            .await?;
+        self.next_index += 1;
+        Ok(())
+    }
+
+    pub(crate) async fn completed(
+        &self,
+        event: &ResponseEvent,
+        output_items: &[ResponseItem],
+    ) -> Result<()> {
+        let result = json!({
+            "terminal": serde_json::to_value(event)?,
+            "outputItems": output_items,
+        });
+        self.binding
+            .append(json!({
+                "eventId": format!("dsh-model-result-{}", self.attempt_id),
+                "turn": self.binding.turn,
+                "kind": "model/result",
+                "attemptId": &self.attempt_id,
+                "purpose": self.purpose,
+                "stage": "codex",
+                "result": { "kind": "inline", "value": result },
+            }))
+            .await
     }
 }
 

@@ -76,7 +76,7 @@ pub struct MemorySummarizeOutput {
 #[derive(Clone, Debug)]
 pub struct ResponseId(pub String);
 
-#[derive(Debug)]
+#[derive(Debug, Serialize)]
 pub enum ResponseEvent {
     Created {
         /// Existing server response ID, when supplied by the stream.
@@ -130,11 +130,11 @@ pub enum ResponseEvent {
     ModelsEtag(String),
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct SafetyBuffering {
     pub use_cases: Vec<String>,
     pub reasons: Vec<String>,
-    #[serde(skip)]
+    #[serde(skip_deserializing)]
     pub show_buffering_ui: bool,
     #[serde(rename = "retry_model")]
     pub faster_model: Option<String>,

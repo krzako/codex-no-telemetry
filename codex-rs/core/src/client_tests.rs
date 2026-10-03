@@ -13,6 +13,7 @@ use crate::AttestationContext;
 use crate::AttestationProvider;
 use crate::GenerateAttestationFuture;
 use crate::dsh_audit::DshAuditBinding;
+use crate::dsh_audit::DshModelAttempt;
 use crate::responses_metadata::CodexResponsesMetadata;
 use crate::test_support::TestCodexResponsesRequestKind;
 use crate::test_support::responses_metadata as test_responses_metadata;
@@ -1304,6 +1305,7 @@ async fn dropped_response_stream_traces_cancelled_partial_output() -> anyhow::Re
         test_session_telemetry(),
         attempt,
         test_model_provider(),
+        None,
     );
 
     let observed = stream
@@ -1355,6 +1357,7 @@ async fn response_stream_records_last_model_feedback_ids() {
         test_session_telemetry(),
         InferenceTraceAttempt::disabled(),
         test_model_provider(),
+        None,
     );
 
     while stream.next().await.is_some() {}
@@ -1368,6 +1371,134 @@ async fn response_stream_records_last_model_feedback_ids() {
         tags.get("last_model_response_id").map(String::as_str),
         Some("\"resp-123\"")
     );
+}
+
+#[tokio::test]
+async fn dsh_model_stream_is_acknowledged_before_delivery() -> anyhow::Result<()> {
+    let recorded = Arc::new(Mutex::new(Vec::new()));
+    let facts = Arc::clone(&recorded);
+    let completed_ack = Arc::new(Notify::new());
+    let completion_gate = Arc::clone(&completed_ack);
+    let binding = Arc::new(DshAuditBinding::new(
+        "session-a".to_string(),
+        7,
+        move |fact| {
+            let facts = Arc::clone(&facts);
+            let completion_gate = Arc::clone(&completion_gate);
+            Box::pin(async move {
+                if fact["kind"] == "model/result" {
+                    completion_gate.notified().await;
+                }
+                facts.lock().unwrap().push(fact);
+                Ok(())
+            })
+        },
+    ));
+    let item = output_message("1", "answer");
+    let api_stream = futures::stream::iter([
+        Ok(ResponseEvent::OutputItemDone(item.clone())),
+        Ok(ResponseEvent::Completed {
+            response_id: "resp-1".to_string(),
+            token_usage: None,
+            usage_metadata: None,
+            end_turn: Some(true),
+        }),
+    ]);
+    let (mut stream, _) = super::map_response_events(
+        None,
+        api_stream,
+        test_session_telemetry(),
+        InferenceTraceAttempt::disabled(),
+        test_model_provider(),
+        Some(DshModelAttempt::new(
+            binding,
+            "attempt-1".to_string(),
+            "inference",
+        )),
+    );
+
+    assert!(matches!(
+        stream.next().await,
+        Some(Ok(ResponseEvent::OutputItemDone(_)))
+    ));
+    assert_eq!(
+        *recorded.lock().unwrap(),
+        vec![json!({
+            "eventId": "dsh-model-stream-attempt-1-0",
+            "turn": 7,
+            "kind": "model/stream",
+            "attemptId": "attempt-1",
+            "purpose": "inference",
+            "stage": "codex",
+            "index": 0,
+            "chunk": { "kind": "inline", "value": serde_json::to_value(ResponseEvent::OutputItemDone(item.clone()))? },
+        })]
+    );
+
+    completed_ack.notify_one();
+    assert!(matches!(
+        stream.next().await,
+        Some(Ok(ResponseEvent::Completed { .. }))
+    ));
+    assert_eq!(
+        *recorded.lock().unwrap(),
+        vec![
+            json!({
+                "eventId": "dsh-model-stream-attempt-1-0",
+                "turn": 7,
+                "kind": "model/stream",
+                "attemptId": "attempt-1",
+                "purpose": "inference",
+                "stage": "codex",
+                "index": 0,
+                "chunk": { "kind": "inline", "value": serde_json::to_value(ResponseEvent::OutputItemDone(item.clone()))? },
+            }),
+            json!({
+                "eventId": "dsh-model-result-attempt-1",
+                "turn": 7,
+                "kind": "model/result",
+                "attemptId": "attempt-1",
+                "purpose": "inference",
+                "stage": "codex",
+                "result": { "kind": "inline", "value": {
+                    "terminal": serde_json::to_value(ResponseEvent::Completed {
+                        response_id: "resp-1".to_string(),
+                        token_usage: None,
+                        usage_metadata: None,
+                        end_turn: Some(true),
+                    })?,
+                    "outputItems": [item],
+                } },
+            }),
+        ]
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn dsh_model_stream_ack_failure_stops_delivery() {
+    let binding = Arc::new(DshAuditBinding::new("session-a".to_string(), 7, |_fact| {
+        Box::pin(async { anyhow::bail!("audit unavailable") })
+    }));
+    let api_stream = futures::stream::iter([Ok(ResponseEvent::OutputTextDelta("secret".into()))]);
+    let (mut stream, _) = super::map_response_events(
+        None,
+        api_stream,
+        test_session_telemetry(),
+        InferenceTraceAttempt::disabled(),
+        test_model_provider(),
+        Some(DshModelAttempt::new(
+            binding,
+            "attempt-1".to_string(),
+            "inference",
+        )),
+    );
+
+    assert!(matches!(
+        stream.next().await,
+        Some(Err(error)) if matches!(error.details(), CodexErrorDetails::Fatal(message) if message.contains("audit unavailable"))
+    ));
+    assert!(stream.next().await.is_none());
 }
 
 #[tokio::test]
@@ -1576,6 +1707,7 @@ async fn dropped_backpressured_response_stream_traces_cancelled_partial_output()
         test_session_telemetry(),
         attempt,
         test_model_provider(),
+        None,
     );
 
     // Fill the mapper channel with non-terminal events, then yield one output
