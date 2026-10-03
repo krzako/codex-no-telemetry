@@ -5,6 +5,7 @@ use std::time::Instant;
 use crate::Prompt;
 use crate::client::ModelClientSession;
 use crate::client_common::ResponseEvent;
+use crate::compaction_audit;
 use crate::context::CompactionSummary;
 use crate::context::ContextualUserFragment;
 use crate::context::world_state::WorldState;
@@ -254,7 +255,9 @@ async fn run_compact_task_inner_impl(
     initial_context_injection: InitialContextInjection,
     compaction_metadata: CompactionTurnMetadata,
 ) -> CodexResult<String> {
-    let compaction_item = TurnItem::ContextCompaction(ContextCompactionItem::new());
+    let context_compaction_item = ContextCompactionItem::new();
+    let compaction_id = context_compaction_item.id.clone();
+    let compaction_item = TurnItem::ContextCompaction(context_compaction_item);
     sess.emit_turn_item_started(&turn_context, &compaction_item)
         .await;
     let initial_input_for_turn: ResponseInputItem = ResponseInputItem::from(input);
@@ -264,6 +267,7 @@ async fn run_compact_task_inner_impl(
         &[initial_input_for_turn.into()],
         turn_context.model_info().truncation_policy.into(),
     );
+    let input_history: Vec<ResponseItem> = history.raw_items().cloned().collect();
 
     let max_retries = turn_context.provider.info().stream_max_retries();
     let mut retries = 0;
@@ -290,6 +294,15 @@ async fn run_compact_task_inner_impl(
             base_instructions: sess.get_prompt_base_instructions().await,
             ..Default::default()
         };
+        compaction_audit::record_request(
+            turn_context.dsh_audit_binding(),
+            compaction_id.as_str(),
+            compaction_metadata,
+            &input_history,
+            &prompt,
+            turn_context.model_info().slug.as_str(),
+        )
+        .await?;
         let attempt_result = drain_to_completed(
             &sess,
             turn_context.as_ref(),

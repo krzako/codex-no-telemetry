@@ -6,6 +6,7 @@ use crate::Prompt;
 use crate::client::ModelClientSession;
 use crate::compact::CompactionAnalyticsDetails;
 use crate::compact_remote_history::trim_function_call_history_to_fit_context_window;
+use crate::compaction_audit;
 use crate::responses_metadata::CompactionTurnMetadata;
 use crate::session::session::Session;
 use crate::session::step_context::StepContext;
@@ -32,11 +33,13 @@ pub(super) async fn run_remote_compact_v2_attempt(
     step_context: &Arc<StepContext>,
     client_session: Option<&mut ModelClientSession>,
     compaction_trace: &CompactionTraceContext,
+    compaction_id: &str,
     compaction_metadata: CompactionTurnMetadata,
     analytics_details: &mut CompactionAnalyticsDetails,
 ) -> CodexResult<RemoteCompactV2Attempt> {
     let turn_context = &step_context.turn;
     let mut history = sess.clone_history().await;
+    let input_history: Vec<ResponseItem> = history.raw_items().cloned().collect();
     let base_instructions = sess.get_prompt_base_instructions().await;
     let (rewritten_outputs, estimated_deleted_tokens) =
         trim_function_call_history_to_fit_context_window(
@@ -85,6 +88,15 @@ pub(super) async fn run_remote_compact_v2_attempt(
         output_schema_strict: true,
         cyber_access_program: turn_context.cyber_access_program,
     };
+    compaction_audit::record_request(
+        turn_context.dsh_audit_binding(),
+        compaction_id,
+        compaction_metadata,
+        &input_history,
+        &prompt,
+        turn_context.model_info().slug.as_str(),
+    )
+    .await?;
 
     let mut responses_metadata = sess
         .compaction_responses_metadata(turn_context.as_ref(), compaction_metadata)

@@ -246,6 +246,7 @@ async fn run_remote_compact_task_inner_impl(
         step_context,
         client_session.as_deref_mut(),
         &compaction_trace,
+        compaction_id.as_str(),
         compaction_metadata,
         analytics_details,
     )
@@ -274,6 +275,7 @@ async fn run_remote_compact_task_inner_impl(
                 fallback_step_context,
                 client_session,
                 &fallback_compaction_trace,
+                compaction_id.as_str(),
                 compaction_metadata,
                 analytics_details,
             )
