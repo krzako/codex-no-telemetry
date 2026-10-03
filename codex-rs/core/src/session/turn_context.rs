@@ -383,6 +383,12 @@ enum TurnContextBuildMode {
 }
 
 impl TurnContext {
+    pub(crate) fn dsh_audit_binding(&self) -> Option<Arc<crate::dsh_audit::DshAuditBinding>> {
+        self.extension_data
+            .get::<Arc<crate::dsh_audit::DshAuditBinding>>()
+            .map(|binding| Arc::clone(binding.as_ref()))
+    }
+
     /// Captures current model metadata without preparing a step.
     pub(crate) fn capture_current_model_info(&self) -> Arc<ModelInfo> {
         Arc::clone(&self.next_step_input.load().settings.model_info)

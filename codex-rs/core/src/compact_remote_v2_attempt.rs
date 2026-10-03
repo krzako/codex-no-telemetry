@@ -101,6 +101,7 @@ pub(super) async fn run_remote_compact_v2_attempt(
         Some(client_session) => client_session,
         None => owned_client_session.insert(sess.services.model_client.new_session()),
     };
+    client_session.set_dsh_audit(turn_context.dsh_audit_binding());
     let compaction_output_result = run_remote_compaction_request_v2(
         sess,
         step_context,

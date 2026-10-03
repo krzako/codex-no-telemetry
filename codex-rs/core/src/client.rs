@@ -126,8 +126,10 @@ use crate::client_common::ResponseStream;
 use crate::context::BaseInstructionsFragment;
 use crate::context::ContextualUserFragment;
 use crate::cyber_access_program;
+use crate::dsh_audit::DshAuditBinding;
 use crate::feedback_tags;
 use crate::responses_metadata::CodexResponsesMetadata;
+use crate::responses_metadata::CodexResponsesRequestKind;
 use crate::responses_metadata::subagent_header_value;
 use crate::util::emit_feedback_auth_recovery_tags;
 use codex_feedback::FeedbackRequestTags;
@@ -284,6 +286,7 @@ pub struct ModelClient {
 /// contract and can cause routing bugs.
 pub struct ModelClientSession {
     client: ModelClient,
+    dsh_audit: Option<Arc<DshAuditBinding>>,
     websocket_session: WebsocketSession,
     /// Turn state for sticky routing.
     ///
@@ -597,6 +600,7 @@ impl ModelClient {
         }
         ModelClientSession {
             client: self.clone(),
+            dsh_audit: None,
             websocket_session,
             turn_state: Arc::new(OnceLock::new()),
         }
@@ -1348,6 +1352,43 @@ impl Drop for ModelClientSession {
 }
 
 impl ModelClientSession {
+    pub(crate) fn set_dsh_audit(&mut self, binding: Option<Arc<DshAuditBinding>>) {
+        self.dsh_audit = binding;
+    }
+
+    async fn audit_model_request(
+        &self,
+        headers: &ApiHeaderMap,
+        request: &ResponsesApiRequest,
+        responses_metadata: &CodexResponsesMetadata,
+    ) -> Result<()> {
+        if self.client.state.provider.info().name != DSH_GATEWAY_PROVIDER_NAME {
+            return Ok(());
+        }
+        let binding = self.dsh_audit.as_ref().ok_or_else(|| {
+            CodexErr::Fatal("DSH model request has no required audit binding".to_string())
+        })?;
+        let attempt_id = headers
+            .get("x-dsh-model-attempt-id")
+            .and_then(|value| value.to_str().ok())
+            .ok_or_else(|| CodexErr::Fatal("DSH model request has no attempt ID".to_string()))?;
+        let purpose = if matches!(
+            responses_metadata.request_kind,
+            Some(CodexResponsesRequestKind::Compaction(_))
+        ) {
+            "compaction"
+        } else {
+            "inference"
+        };
+        let request = serde_json::to_value(request).map_err(|error| {
+            CodexErr::Fatal(format!("DSH model audit serialization failed: {error}"))
+        })?;
+        binding
+            .model_request(attempt_id, purpose, request)
+            .await
+            .map_err(|error| CodexErr::Fatal(format!("DSH model audit failed: {error}")))
+    }
+
     #[allow(clippy::too_many_arguments)]
     /// Builds shared Responses API transport options and request-body options.
     ///
@@ -1716,6 +1757,8 @@ impl ModelClientSession {
             let request_session_telemetry =
                 session_telemetry_for_request(session_telemetry, &request);
             options.extra_headers.extend(responses_headers);
+            self.audit_model_request(&options.extra_headers, &request, responses_metadata)
+                .await?;
             let inference_trace_attempt = inference_trace.start_attempt();
             inference_trace_attempt.add_request_headers(&mut options.extra_headers);
             inference_trace_attempt.record_started(&request);
@@ -1991,6 +2034,10 @@ impl ModelClientSession {
             );
             let mut ws_request = ResponsesWsRequest::ResponseCreate(ws_payload);
             stamp_ws_stream_request_start_ms(&mut ws_request);
+            if !warmup {
+                self.audit_model_request(&responses_headers, &request, responses_metadata)
+                    .await?;
+            }
             if !previous_response_id_from_untraced_warmup {
                 inference_trace_attempt.record_started(&ws_request);
             }

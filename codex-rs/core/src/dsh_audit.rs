@@ -8,6 +8,7 @@ use std::sync::PoisonError;
 use anyhow::Result;
 use futures::future::BoxFuture;
 use serde_json::Value;
+use serde_json::json;
 
 type Append = dyn Fn(Value) -> BoxFuture<'static, Result<()>> + Send + Sync;
 
@@ -52,6 +53,25 @@ impl DshAuditBinding {
     /// Await the host's durable acknowledgment before dependent work proceeds.
     pub async fn append(&self, fact: Value) -> Result<()> {
         (self.append)(fact).await
+    }
+
+    pub(crate) async fn model_request(
+        &self,
+        attempt_id: &str,
+        purpose: &'static str,
+        request: Value,
+    ) -> Result<()> {
+        self.append(json!({
+            "eventId": format!("dsh-model-request-{attempt_id}"),
+            "turn": self.turn,
+            "kind": "model/request",
+            "attemptId": attempt_id,
+            "purpose": purpose,
+            "stage": "model-visible",
+            "apiFormat": "responses",
+            "request": { "kind": "inline", "value": request },
+        }))
+        .await
     }
 }
 
@@ -105,5 +125,39 @@ mod tests {
             .expect("host ACK");
         assert!(registry.take(3).is_none());
         assert!(registry.take(4).is_none());
+    }
+
+    #[tokio::test]
+    async fn model_request_preserves_the_full_payload_and_attempt_identity() {
+        let recorded = Arc::new(Mutex::new(Vec::new()));
+        let facts = Arc::clone(&recorded);
+        let binding = DshAuditBinding::new("session-a".to_string(), 7, move |fact| {
+            let facts = Arc::clone(&facts);
+            Box::pin(async move {
+                facts
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .push(fact);
+                Ok(())
+            })
+        });
+        let request = json!({ "model": "custom", "instructions": "keep me", "input": [] });
+        binding
+            .model_request("123", "compaction", request.clone())
+            .await
+            .expect("host ACK");
+        assert_eq!(
+            *recorded.lock().unwrap_or_else(PoisonError::into_inner),
+            vec![json!({
+                "eventId": "dsh-model-request-123",
+                "turn": 7,
+                "kind": "model/request",
+                "attemptId": "123",
+                "purpose": "compaction",
+                "stage": "model-visible",
+                "apiFormat": "responses",
+                "request": { "kind": "inline", "value": request },
+            })]
+        );
     }
 }

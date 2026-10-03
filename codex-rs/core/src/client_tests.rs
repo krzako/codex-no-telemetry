@@ -1,4 +1,5 @@
 use super::AuthRequestTelemetryContext;
+use super::DSH_GATEWAY_PROVIDER_NAME;
 use super::ModelClient;
 use super::PendingUnauthorizedRetry;
 use super::Prompt;
@@ -11,6 +12,7 @@ use super::X_OPENAI_SUBAGENT_HEADER;
 use crate::AttestationContext;
 use crate::AttestationProvider;
 use crate::GenerateAttestationFuture;
+use crate::dsh_audit::DshAuditBinding;
 use crate::responses_metadata::CodexResponsesMetadata;
 use crate::test_support::TestCodexResponsesRequestKind;
 use crate::test_support::responses_metadata as test_responses_metadata;
@@ -126,6 +128,56 @@ fn test_model_client_with_thread_id(
             "https://chatgpt.com/backend-api".into(),
         ),
     )
+}
+
+#[tokio::test]
+async fn dsh_request_audit_requires_binding_and_durable_ack() {
+    let mut client = test_model_client(SessionSource::Cli);
+    let mut provider =
+        create_oss_provider_with_base_url("https://example.com/v1", WireApi::Responses);
+    provider.name = DSH_GATEWAY_PROVIDER_NAME.to_string();
+    Arc::get_mut(&mut client.state)
+        .expect("unique test client")
+        .provider = create_model_provider(provider, /*auth_manager*/ None);
+    let model = test_model_info();
+    let metadata = test_responses_metadata_for_client(
+        &client,
+        /*turn_id*/ None,
+        format!("{}:0", client.state.thread_id),
+        /*parent_thread_id*/ None,
+        TestCodexResponsesRequestKind::Turn,
+    );
+    let request = client
+        .build_responses_request(
+            &Prompt::default(),
+            &model,
+            /*effort*/ None,
+            codex_protocol::config_types::ReasoningSummary::None,
+            /*service_tier*/ None,
+            &metadata,
+        )
+        .expect("build request");
+    let headers = client
+        .responses_headers(/*auth*/ None, &model.slug)
+        .expect("attempt ID");
+    let mut session = client.new_session();
+    let missing = session
+        .audit_model_request(&headers, &request, &metadata)
+        .await
+        .expect_err("missing binding must block the request");
+    assert!(matches!(missing.details(), CodexErrorDetails::Fatal(_)));
+
+    session.set_dsh_audit(Some(Arc::new(DshAuditBinding::new(
+        "dsh-session".to_string(),
+        1,
+        |_| Box::pin(async { anyhow::bail!("storage unavailable") }),
+    ))));
+    let failed_ack = session
+        .audit_model_request(&headers, &request, &metadata)
+        .await
+        .expect_err("missing host ACK must block the request");
+    assert!(matches!(failed_ack.details(), CodexErrorDetails::Fatal(_)));
+    assert!(failed_ack.to_string().contains("storage unavailable"));
 }
 
 fn test_model_provider() -> SharedModelProvider {
