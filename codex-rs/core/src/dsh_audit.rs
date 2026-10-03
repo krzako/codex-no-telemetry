@@ -4,6 +4,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::PoisonError;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 
 use anyhow::Result;
 use codex_api::ResponseEvent;
@@ -11,6 +13,7 @@ use codex_protocol::models::ResponseItem;
 use futures::future::BoxFuture;
 use serde_json::Value;
 use serde_json::json;
+use tokio::sync::Mutex as AsyncMutex;
 
 type Append = dyn Fn(Value) -> BoxFuture<'static, Result<()>> + Send + Sync;
 
@@ -19,6 +22,8 @@ pub struct DshAuditBinding {
     session_id: String,
     turn: u64,
     append: Arc<Append>,
+    append_gate: AsyncMutex<()>,
+    failed: AtomicBool,
 }
 
 impl std::fmt::Debug for DshAuditBinding {
@@ -41,6 +46,8 @@ impl DshAuditBinding {
             session_id,
             turn,
             append: Arc::new(append),
+            append_gate: AsyncMutex::new(()),
+            failed: AtomicBool::new(false),
         }
     }
 
@@ -54,7 +61,17 @@ impl DshAuditBinding {
 
     /// Await the host's durable acknowledgment before dependent work proceeds.
     pub async fn append(&self, fact: Value) -> Result<()> {
-        (self.append)(fact).await
+        let _guard = self.append_gate.lock().await;
+        if self.failed.load(Ordering::Acquire) {
+            anyhow::bail!("DSH audit binding failed earlier in this turn");
+        }
+        match (self.append)(fact).await {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                self.failed.store(true, Ordering::Release);
+                Err(error)
+            }
+        }
     }
 
     pub(crate) async fn model_request(
@@ -140,6 +157,31 @@ impl DshModelAttempt {
             }))
             .await
     }
+
+    pub(crate) async fn failure(
+        &self,
+        code: &'static str,
+        message: &str,
+        output_items: &[ResponseItem],
+        upstream_request_id: Option<&str>,
+    ) -> Result<()> {
+        self.binding
+            .append(json!({
+                "eventId": format!("dsh-model-failure-{}", self.attempt_id),
+                "turn": self.binding.turn,
+                "kind": "model/failure",
+                "attemptId": &self.attempt_id,
+                "purpose": self.purpose,
+                "stage": "codex",
+                "code": code,
+                "message": message,
+                "details": { "kind": "inline", "value": {
+                    "outputItems": output_items,
+                    "upstreamRequestId": upstream_request_id,
+                } },
+            }))
+            .await
+    }
 }
 
 /// Temporary handoff from one app-server request to one newly admitted Core turn.
@@ -171,6 +213,7 @@ impl DshAuditBindingRegistry {
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::sync::atomic::AtomicUsize;
 
     #[tokio::test]
     async fn binding_is_single_use_and_keeps_the_host_ack() {
@@ -226,5 +269,32 @@ mod tests {
                 "request": { "kind": "inline", "value": request },
             })]
         );
+    }
+
+    #[tokio::test]
+    async fn missing_ack_poisoning_blocks_later_model_work() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let callback_calls = Arc::clone(&calls);
+        let binding = DshAuditBinding::new("session-a".into(), 7, move |_fact| {
+            let callback_calls = Arc::clone(&callback_calls);
+            Box::pin(async move {
+                callback_calls.fetch_add(1, Ordering::SeqCst);
+                anyhow::bail!("storage unavailable")
+            })
+        });
+
+        assert!(
+            binding
+                .append(json!({ "kind": "model/failure" }))
+                .await
+                .is_err()
+        );
+        assert!(
+            binding
+                .model_request("attempt-2", "inference", json!({ "input": [] }))
+                .await
+                .is_err()
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 }

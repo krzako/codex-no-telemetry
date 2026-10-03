@@ -1502,6 +1502,252 @@ async fn dsh_model_stream_ack_failure_stops_delivery() {
 }
 
 #[tokio::test]
+async fn dsh_model_failure_keeps_partial_output_and_precedes_delivery() -> anyhow::Result<()> {
+    let recorded = Arc::new(Mutex::new(Vec::new()));
+    let facts = Arc::clone(&recorded);
+    let binding = Arc::new(DshAuditBinding::new("session-a".into(), 7, move |fact| {
+        let facts = Arc::clone(&facts);
+        Box::pin(async move {
+            facts.lock().unwrap().push(fact);
+            Ok(())
+        })
+    }));
+    let item = output_message("1", "partial answer");
+    let api_stream = futures::stream::iter([
+        Ok(ResponseEvent::OutputItemDone(item.clone())),
+        Err(ApiError::Stream("connection lost".into())),
+    ]);
+    let (mut stream, _) = super::map_response_events(
+        Some("upstream-1".into()),
+        api_stream,
+        test_session_telemetry(),
+        InferenceTraceAttempt::disabled(),
+        test_model_provider(),
+        Some(DshModelAttempt::new(
+            binding,
+            "attempt-1".into(),
+            "inference",
+        )),
+    );
+
+    assert!(matches!(
+        stream.next().await,
+        Some(Ok(ResponseEvent::OutputItemDone(_)))
+    ));
+    assert!(matches!(stream.next().await, Some(Err(_))));
+    assert_eq!(
+        recorded.lock().unwrap().as_slice(),
+        [
+            json!({
+                "eventId": "dsh-model-stream-attempt-1-0",
+                "turn": 7,
+                "kind": "model/stream",
+                "attemptId": "attempt-1",
+                "purpose": "inference",
+                "stage": "codex",
+                "index": 0,
+                "chunk": { "kind": "inline", "value": serde_json::to_value(ResponseEvent::OutputItemDone(item.clone()))? },
+            }),
+            json!({
+                "eventId": "dsh-model-failure-attempt-1",
+                "turn": 7,
+                "kind": "model/failure",
+                "attemptId": "attempt-1",
+                "purpose": "inference",
+                "stage": "codex",
+                "code": "stream",
+                "message": "stream disconnected before completion: connection lost",
+                "details": { "kind": "inline", "value": {
+                    "outputItems": [item],
+                    "upstreamRequestId": "upstream-1",
+                } },
+            }),
+        ]
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn dsh_model_failure_ack_failure_masks_provider_error() {
+    let binding = Arc::new(DshAuditBinding::new("session-a".into(), 7, |_fact| {
+        Box::pin(async { anyhow::bail!("audit unavailable") })
+    }));
+    let api_stream = futures::stream::iter([Err(ApiError::Stream("connection lost".into()))]);
+    let (mut stream, _) = super::map_response_events(
+        None,
+        api_stream,
+        test_session_telemetry(),
+        InferenceTraceAttempt::disabled(),
+        test_model_provider(),
+        Some(DshModelAttempt::new(
+            binding,
+            "attempt-1".into(),
+            "inference",
+        )),
+    );
+
+    assert!(matches!(
+        stream.next().await,
+        Some(Err(error)) if matches!(error.details(), CodexErrorDetails::Fatal(message) if message.contains("audit unavailable"))
+    ));
+    assert!(stream.next().await.is_none());
+}
+
+#[tokio::test]
+async fn dsh_model_incomplete_stream_records_failure_before_error() {
+    let recorded = Arc::new(Mutex::new(Vec::new()));
+    let facts = Arc::clone(&recorded);
+    let binding = Arc::new(DshAuditBinding::new("session-a".into(), 7, move |fact| {
+        let facts = Arc::clone(&facts);
+        Box::pin(async move {
+            facts.lock().unwrap().push(fact);
+            Ok(())
+        })
+    }));
+    let (mut stream, _) = super::map_response_events(
+        None,
+        futures::stream::empty(),
+        test_session_telemetry(),
+        InferenceTraceAttempt::disabled(),
+        test_model_provider(),
+        Some(DshModelAttempt::new(
+            binding,
+            "attempt-1".into(),
+            "compaction",
+        )),
+    );
+
+    assert!(matches!(stream.next().await, Some(Err(_))));
+    assert_eq!(
+        *recorded.lock().unwrap(),
+        vec![json!({
+            "eventId": "dsh-model-failure-attempt-1",
+            "turn": 7,
+            "kind": "model/failure",
+            "attemptId": "attempt-1",
+            "purpose": "compaction",
+            "stage": "codex",
+            "code": "incomplete",
+            "message": "stream closed before response.completed",
+            "details": { "kind": "inline", "value": {
+                "outputItems": [],
+                "upstreamRequestId": null,
+            } },
+        })]
+    );
+}
+
+#[tokio::test]
+async fn dsh_model_cancelled_stream_records_partial_output() {
+    let recorded = Arc::new(Mutex::new(Vec::new()));
+    let facts = Arc::clone(&recorded);
+    let cancellation_recorded = Arc::new(Notify::new());
+    let cancellation_notification = Arc::clone(&cancellation_recorded);
+    let binding = Arc::new(DshAuditBinding::new("session-a".into(), 7, move |fact| {
+        let facts = Arc::clone(&facts);
+        let cancellation_notification = Arc::clone(&cancellation_notification);
+        Box::pin(async move {
+            let cancelled = fact["code"] == "cancelled";
+            facts.lock().unwrap().push(fact);
+            if cancelled {
+                cancellation_notification.notify_one();
+            }
+            Ok(())
+        })
+    }));
+    let item = output_message("1", "partial answer");
+    let api_stream = futures::stream::iter([Ok(ResponseEvent::OutputItemDone(item.clone()))])
+        .chain(futures::stream::pending());
+    let (mut stream, _) = super::map_response_events(
+        None,
+        api_stream,
+        test_session_telemetry(),
+        InferenceTraceAttempt::disabled(),
+        test_model_provider(),
+        Some(DshModelAttempt::new(
+            binding,
+            "attempt-1".into(),
+            "inference",
+        )),
+    );
+
+    assert!(matches!(
+        stream.next().await,
+        Some(Ok(ResponseEvent::OutputItemDone(_)))
+    ));
+    drop(stream);
+    tokio::time::timeout(Duration::from_secs(3), cancellation_recorded.notified())
+        .await
+        .expect("cancellation audit was not acknowledged");
+    assert_eq!(
+        recorded.lock().unwrap()[1]["details"]["value"]["outputItems"],
+        json!([item])
+    );
+}
+
+#[tokio::test]
+async fn dsh_http_transport_failure_uses_the_audited_attempt_id() -> anyhow::Result<()> {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/responses"))
+        .respond_with(ResponseTemplate::new(503).set_body_json(json!({
+            "error": { "message": "upstream unavailable" },
+        })))
+        .mount(&server)
+        .await;
+    let mut provider =
+        ModelProviderInfo::create_openai_provider(Some(format!("{}/v1", server.uri())));
+    provider.name = DSH_GATEWAY_PROVIDER_NAME.to_string();
+    provider.requires_openai_auth = false;
+    provider.supports_websockets = false;
+    let mut client = test_model_client(SessionSource::Cli);
+    Arc::get_mut(&mut client.state)
+        .expect("unique test client")
+        .provider = create_model_provider(provider, None);
+    let metadata = test_responses_metadata_for_client(
+        &client,
+        None,
+        format!("{}:0", client.state.thread_id),
+        None,
+        TestCodexResponsesRequestKind::Turn,
+    );
+    let recorded = Arc::new(Mutex::new(Vec::new()));
+    let facts = Arc::clone(&recorded);
+    let binding = Arc::new(DshAuditBinding::new("session-a".into(), 7, move |fact| {
+        let facts = Arc::clone(&facts);
+        Box::pin(async move {
+            facts.lock().unwrap().push(fact);
+            Ok(())
+        })
+    }));
+    let mut session = client.new_session();
+    session.set_dsh_audit(Some(binding));
+
+    assert!(
+        session
+            .stream(
+                &Prompt::default(),
+                &test_model_info(),
+                &test_session_telemetry(),
+                None,
+                codex_protocol::config_types::ReasoningSummary::None,
+                None,
+                &metadata,
+                &InferenceTraceContext::disabled(),
+            )
+            .await
+            .is_err()
+    );
+    let facts = recorded.lock().unwrap();
+    assert_eq!(facts.len(), 2);
+    assert_eq!(facts[0]["kind"], "model/request");
+    assert_eq!(facts[1]["kind"], "model/failure");
+    assert_eq!(facts[1]["code"], "transport");
+    assert_eq!(facts[0]["attemptId"], facts[1]["attemptId"]);
+    Ok(())
+}
+
+#[tokio::test]
 async fn bedrock_unauthorized_error_uses_provider_mapping() {
     let provider = create_model_provider(
         ModelProviderInfo::create_amazon_bedrock_provider(/*aws*/ None),

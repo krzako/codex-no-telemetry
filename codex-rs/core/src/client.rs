@@ -1797,6 +1797,19 @@ impl ModelClientSession {
                 {
                     let response_debug_context =
                         extract_response_debug_context(&unauthorized_transport);
+                    if let Some(attempt) = dsh_attempt.as_ref() {
+                        attempt
+                            .failure(
+                                "transport",
+                                &unauthorized_transport.to_string(),
+                                &[],
+                                response_debug_context.request_id.as_deref(),
+                            )
+                            .await
+                            .map_err(|error| {
+                                CodexErr::Fatal(format!("DSH model audit failed: {error}"))
+                            })?;
+                    }
                     inference_trace_attempt.record_failed(
                         &unauthorized_transport,
                         response_debug_context.request_id.as_deref(),
@@ -1820,6 +1833,19 @@ impl ModelClientSession {
                     let response_debug_context =
                         extract_response_debug_context_from_api_error(&err);
                     let err = self.client.state.provider.map_api_error(err);
+                    if let Some(attempt) = dsh_attempt.as_ref() {
+                        attempt
+                            .failure(
+                                "transport",
+                                &err.to_string(),
+                                &[],
+                                response_debug_context.request_id.as_deref(),
+                            )
+                            .await
+                            .map_err(|error| {
+                                CodexErr::Fatal(format!("DSH model audit failed: {error}"))
+                            })?;
+                    }
                     inference_trace_attempt.record_failed(
                         &err,
                         response_debug_context.request_id.as_deref(),
@@ -2052,12 +2078,23 @@ impl ModelClientSession {
                 inference_trace_attempt.record_started(&ws_request);
             }
 
-            let websocket_connection =
-                self.websocket_session.connection.as_ref().ok_or_else(|| {
-                    self.client.state.provider.map_api_error(ApiError::Stream(
+            let websocket_connection = match self.websocket_session.connection.as_ref() {
+                Some(connection) => connection,
+                None => {
+                    let err = self.client.state.provider.map_api_error(ApiError::Stream(
                         "websocket connection is unavailable".to_string(),
-                    ))
-                })?;
+                    ));
+                    if let Some(attempt) = dsh_attempt.as_ref() {
+                        attempt
+                            .failure("transport", &err.to_string(), &[], None)
+                            .await
+                            .map_err(|error| {
+                                CodexErr::Fatal(format!("DSH model audit failed: {error}"))
+                            })?;
+                    }
+                    return Err(err);
+                }
+            };
             request_session_telemetry.counter(
                 WEBSOCKET_CONTINUATION_COUNT_METRIC,
                 /*inc*/ 1,
@@ -2081,16 +2118,33 @@ impl ModelClientSession {
             }
             self.websocket_session.last_request = Some(request);
             self.websocket_session.last_response_from_untraced_warmup = warmup;
-            let stream_result = stream_result.map_err(|err| {
-                let response_debug_context = extract_response_debug_context_from_api_error(&err);
-                let err = self.client.state.provider.map_api_error(err);
-                inference_trace_attempt.record_failed(
-                    &err,
-                    response_debug_context.request_id.as_deref(),
-                    /*output_items*/ &[],
-                );
-                err
-            })?;
+            let stream_result = match stream_result {
+                Ok(stream) => stream,
+                Err(err) => {
+                    let response_debug_context =
+                        extract_response_debug_context_from_api_error(&err);
+                    let err = self.client.state.provider.map_api_error(err);
+                    if let Some(attempt) = dsh_attempt.as_ref() {
+                        attempt
+                            .failure(
+                                "transport",
+                                &err.to_string(),
+                                &[],
+                                response_debug_context.request_id.as_deref(),
+                            )
+                            .await
+                            .map_err(|error| {
+                                CodexErr::Fatal(format!("DSH model audit failed: {error}"))
+                            })?;
+                    }
+                    inference_trace_attempt.record_failed(
+                        &err,
+                        response_debug_context.request_id.as_deref(),
+                        /*output_items*/ &[],
+                    );
+                    return Err(err);
+                }
+            };
             let (stream, last_request_rx) = map_response_stream(
                 stream_result,
                 request_session_telemetry,
@@ -2371,7 +2425,7 @@ where
     let consumer_dropped_for_stream = consumer_dropped.clone();
 
     tokio::spawn(async move {
-        let mut logged_error = false;
+        let mut completed = false;
         let mut tx_last_response = Some(tx_last_response);
         let mut items_added: Vec<ResponseItem> = Vec::new();
         let (request_start, mut ttft_ms) = (Instant::now(), None);
@@ -2384,6 +2438,14 @@ where
         loop {
             let event = tokio::select! {
                 _ = consumer_dropped.cancelled() => {
+                    if !completed && let Some(attempt) = dsh_attempt.as_ref() {
+                        if let Err(error) = attempt
+                            .failure("cancelled", STREAM_DROPPED_REASON, &items_added, upstream_request_id)
+                            .await
+                        {
+                            tracing::error!(%error, "DSH model cancellation audit failed");
+                        }
+                    }
                     inference_trace_attempt.record_cancelled(
                         STREAM_DROPPED_REASON,
                         upstream_request_id,
@@ -2413,6 +2475,9 @@ where
                     return;
                 }
             }
+            if matches!(&event, Ok(ResponseEvent::Completed { .. })) {
+                completed = true;
+            }
             match event {
                 Ok(ResponseEvent::OutputItemDone(item)) => {
                     items_added.push(item.clone());
@@ -2421,6 +2486,19 @@ where
                         .await
                         .is_err()
                     {
+                        if !completed && let Some(attempt) = dsh_attempt.as_ref() {
+                            if let Err(error) = attempt
+                                .failure(
+                                    "cancelled",
+                                    STREAM_DROPPED_REASON,
+                                    &items_added,
+                                    upstream_request_id,
+                                )
+                                .await
+                            {
+                                tracing::error!(%error, "DSH model cancellation audit failed");
+                            }
+                        }
                         inference_trace_attempt.record_cancelled(
                             STREAM_DROPPED_REASON,
                             upstream_request_id,
@@ -2471,6 +2549,19 @@ where
                         );
                     }
                     if tx_event.send(Ok(event)).await.is_err() {
+                        if !completed && let Some(attempt) = dsh_attempt.as_ref() {
+                            if let Err(error) = attempt
+                                .failure(
+                                    "cancelled",
+                                    STREAM_DROPPED_REASON,
+                                    &items_added,
+                                    upstream_request_id,
+                                )
+                                .await
+                            {
+                                tracing::error!(%error, "DSH model cancellation audit failed");
+                            }
+                        }
                         inference_trace_attempt.record_cancelled(
                             STREAM_DROPPED_REASON,
                             upstream_request_id,
@@ -2488,19 +2579,54 @@ where
                         feedback_tags!(last_model_request_id = upstream_request_id);
                     }
                     let mapped = provider.map_api_error(err);
+                    if !completed && let Some(attempt) = dsh_attempt.as_ref() {
+                        if let Err(error) = attempt
+                            .failure(
+                                "stream",
+                                &mapped.to_string(),
+                                &items_added,
+                                upstream_request_id,
+                            )
+                            .await
+                        {
+                            let _ = tx_event
+                                .send(Err(CodexErr::Fatal(format!(
+                                    "DSH model audit failed: {error}"
+                                ))))
+                                .await;
+                            return;
+                        }
+                    }
                     inference_trace_attempt.record_failed(
                         &mapped,
                         upstream_request_id,
                         &items_added,
                     );
-                    if !logged_error {
-                        session_telemetry.see_event_completed_failed(&mapped);
-                        logged_error = true;
-                    }
-                    if tx_event.send(Err(mapped)).await.is_err() {
-                        return;
-                    }
+                    session_telemetry.see_event_completed_failed(&mapped);
+                    let _ = tx_event.send(Err(mapped)).await;
+                    return;
                 }
+            }
+        }
+        if completed {
+            return;
+        }
+        if let Some(attempt) = dsh_attempt.as_ref() {
+            if let Err(error) = attempt
+                .failure(
+                    "incomplete",
+                    "stream closed before response.completed",
+                    &items_added,
+                    upstream_request_id,
+                )
+                .await
+            {
+                let _ = tx_event
+                    .send(Err(CodexErr::Fatal(format!(
+                        "DSH model audit failed: {error}"
+                    ))))
+                    .await;
+                return;
             }
         }
         inference_trace_attempt.record_failed(
@@ -2508,6 +2634,11 @@ where
             upstream_request_id,
             &items_added,
         );
+        let _ = tx_event
+            .send(Err(CodexErr::Stream(
+                "stream closed before response.completed".to_string(),
+            )))
+            .await;
     });
 
     (
