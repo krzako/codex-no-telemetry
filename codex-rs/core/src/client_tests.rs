@@ -1761,6 +1761,153 @@ fn dsh_gateway_never_uses_unimplemented_websocket_transport() {
 }
 
 #[tokio::test]
+async fn dsh_model_visible_attempts_match_wire_requests_across_partial_retry() -> anyhow::Result<()>
+{
+    let server = MockServer::start().await;
+    let sends = Arc::new(AtomicUsize::new(0));
+    let sends_for_mock = Arc::clone(&sends);
+    Mock::given(method("POST"))
+        .and(path("/v1/responses"))
+        .respond_with(move |_request: &wiremock::Request| {
+            let partial = sends_for_mock.fetch_add(1, Ordering::SeqCst) == 0;
+            let body = if partial {
+                concat!(
+                    "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp-partial\"}}\n\n",
+                    "data: {\"type\":\"response.output_text.delta\",\"delta\":\"partial text\"}\n\n",
+                )
+            } else {
+                concat!(
+                    "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp-final\"}}\n\n",
+                    "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-final\"}}\n\n",
+                )
+            };
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(body)
+        })
+        .expect(2)
+        .mount(&server)
+        .await;
+    let mut provider =
+        ModelProviderInfo::create_openai_provider(Some(format!("{}/v1", server.uri())));
+    provider.name = DSH_GATEWAY_PROVIDER_NAME.to_string();
+    provider.requires_openai_auth = false;
+    let mut client = test_model_client(SessionSource::Cli);
+    Arc::get_mut(&mut client.state)
+        .expect("unique test client")
+        .provider = create_model_provider(provider, None);
+    let metadata = test_responses_metadata_for_client(
+        &client,
+        None,
+        format!("{}:0", client.state.thread_id),
+        None,
+        TestCodexResponsesRequestKind::Turn,
+    );
+    let recorded = Arc::new(Mutex::new(Vec::new()));
+    let facts = Arc::clone(&recorded);
+    let binding = Arc::new(DshAuditBinding::new("session-a".into(), 7, move |fact| {
+        let facts = Arc::clone(&facts);
+        Box::pin(async move {
+            facts.lock().unwrap().push(fact);
+            Ok(())
+        })
+    }));
+    let mut session = client.new_session();
+    session.set_dsh_audit(Some(binding));
+
+    let mut partial = session
+        .stream(
+            &Prompt::default(),
+            &test_model_info(),
+            &test_session_telemetry(),
+            None,
+            codex_protocol::config_types::ReasoningSummary::None,
+            None,
+            &metadata,
+            &InferenceTraceContext::disabled(),
+        )
+        .await?;
+    let mut saw_partial_text = false;
+    while let Some(event) = partial.next().await {
+        match event {
+            Ok(ResponseEvent::OutputTextDelta(text)) if text == "partial text" => {
+                saw_partial_text = true;
+            }
+            Err(_) => break,
+            _ => {}
+        }
+    }
+    assert!(saw_partial_text);
+
+    let mut retry = session
+        .stream(
+            &Prompt::default(),
+            &test_model_info(),
+            &test_session_telemetry(),
+            None,
+            codex_protocol::config_types::ReasoningSummary::None,
+            None,
+            &metadata,
+            &InferenceTraceContext::disabled(),
+        )
+        .await?;
+    let mut completed = false;
+    while let Some(event) = retry.next().await {
+        if matches!(event?, ResponseEvent::Completed { .. }) {
+            completed = true;
+        }
+    }
+    assert!(completed);
+
+    let requests = server
+        .received_requests()
+        .await
+        .expect("mock request history");
+    let facts = recorded.lock().unwrap();
+    assert_eq!(requests.len(), 2);
+    let model_requests: Vec<_> = facts
+        .iter()
+        .filter(|fact| fact["kind"] == "model/request")
+        .collect();
+    assert_eq!(model_requests.len(), 2);
+    for (fact, request) in model_requests.iter().zip(requests) {
+        assert_eq!(
+            fact["request"]["value"],
+            serde_json::from_slice::<serde_json::Value>(&request.body)?
+        );
+    }
+    assert_ne!(
+        model_requests[0]["attemptId"],
+        model_requests[1]["attemptId"]
+    );
+    assert!(facts.iter().any(|fact| fact["kind"] == "model/stream"
+        && fact["chunk"]["value"]["OutputTextDelta"] == "partial text"));
+    let failure_position = facts
+        .iter()
+        .position(|fact| fact["kind"] == "model/failure")
+        .expect("first attempt failure");
+    let retry_position = facts
+        .iter()
+        .rposition(|fact| fact["kind"] == "model/request")
+        .expect("retry request");
+    assert!(failure_position < retry_position);
+    assert_eq!(
+        facts[failure_position]["attemptId"],
+        model_requests[0]["attemptId"]
+    );
+    let result = facts
+        .iter()
+        .find(|fact| fact["kind"] == "model/result")
+        .expect("retry result");
+    assert_eq!(result["attemptId"], model_requests[1]["attemptId"]);
+    assert_eq!(
+        result["result"]["value"]["terminal"]["Completed"]["response_id"],
+        "resp-final"
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn bedrock_unauthorized_error_uses_provider_mapping() {
     let provider = create_model_provider(
         ModelProviderInfo::create_amazon_bedrock_provider(/*aws*/ None),
