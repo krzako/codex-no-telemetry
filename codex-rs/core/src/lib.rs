@@ -37,6 +37,8 @@ mod compact_token_budget;
 mod compaction_audit;
 mod dsh_compaction_checkpoint;
 pub use dsh_compaction_checkpoint::DshCompactionCheckpointStatus;
+mod dsh_context_source;
+pub use dsh_context_source::DshContextSource;
 mod thread_startup_metadata;
 pub use codex_network_proxy::EnvironmentNetworkPolicy;
 pub use codex_network_proxy::NetworkDomainPermission;
