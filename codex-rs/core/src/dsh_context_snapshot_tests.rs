@@ -88,6 +88,16 @@ fn preserves_effective_history_config_and_compaction_chain() {
         )
     );
     let serialized = serde_json::to_value(&snapshot).expect("serialize snapshot");
+    // The DSH fixture `agent-codex/tests/fixtures/context-snapshot-v2-rust.json`
+    // is generated from this snapshot; these anchors detect serialization drift.
+    assert_eq!(
+        snapshot.effective_history_sha256,
+        "2e7a4c4074e9d49b76f303800f3e16a1fd69b29ad7b7925e10187708583413fa"
+    );
+    assert_eq!(
+        snapshot.rollout_sha256,
+        "519b57c72105b67760f31c06daa90aa65f2cd606c2507c9e979b4dbaf5ea94c5"
+    );
     assert_eq!(serialized["rolloutSha256"], snapshot.rollout_sha256);
     assert!(serialized.get("rolloutPath").is_none());
 }
