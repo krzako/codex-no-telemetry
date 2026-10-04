@@ -8,10 +8,25 @@ use codex_protocol::error::CodexErr;
 use codex_protocol::error::Result as CodexResult;
 use serde_json::json;
 
+pub(crate) enum DshCheckpointTrigger<'a> {
+    Turn,
+    Compaction(&'a str),
+}
+
+impl DshCheckpointTrigger<'_> {
+    fn checkpoint_id(self, turn_id: &str) -> String {
+        match self {
+            Self::Turn => format!("turn:{turn_id}"),
+            Self::Compaction(id) => format!("compaction:{id}"),
+        }
+    }
+}
+
 impl Session {
     pub(crate) async fn dsh_record_context_checkpoint(
         &self,
         turn_context: &TurnContext,
+        trigger: DshCheckpointTrigger<'_>,
     ) -> CodexResult<()> {
         let Some(binding) = turn_context.dsh_audit_binding() else {
             return Ok(());
@@ -27,23 +42,31 @@ impl Session {
         let snapshot = source
             .into_portable_snapshot(config)
             .map_err(|error| CodexErr::Fatal(format!("DSH checkpoint is not portable: {error}")))?;
-        record_checkpoint_fact(binding.as_ref(), &turn_context.sub_id, snapshot).await
+        let checkpoint_id = trigger.checkpoint_id(&turn_context.sub_id);
+        record_checkpoint_fact(
+            binding.as_ref(),
+            &turn_context.sub_id,
+            &checkpoint_id,
+            snapshot,
+        )
+        .await
     }
 }
 
 async fn record_checkpoint_fact(
     binding: &DshAuditBinding,
     turn_id: &str,
+    checkpoint_id: &str,
     snapshot: DshContextSnapshotV2,
 ) -> CodexResult<()> {
     let effective_history_sha256 = snapshot.effective_history_sha256.clone();
     binding
         .append(json!({
-            "eventId": format!("dsh-context-checkpoint-{turn_id}"),
+            "eventId": format!("dsh-context-checkpoint-{checkpoint_id}"),
             "turn": binding.turn(),
             "codexTurnId": turn_id,
             "kind": "checkpoint",
-            "checkpointId": turn_id,
+            "checkpointId": checkpoint_id,
             "snapshot": { "kind": "inline", "value": snapshot },
             "effectiveHistorySha256": effective_history_sha256,
         }))

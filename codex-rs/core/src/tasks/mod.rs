@@ -682,7 +682,10 @@ impl Session {
         )
         .await;
         if let Err(err) = self
-            .dsh_record_context_checkpoint(turn_context.as_ref())
+            .dsh_record_context_checkpoint(
+                turn_context.as_ref(),
+                crate::dsh_context_checkpoint::DshCheckpointTrigger::Turn,
+            )
             .await
         {
             self.emit_turn_error_lifecycle(turn_context.as_ref(), err.to_codex_protocol_error())

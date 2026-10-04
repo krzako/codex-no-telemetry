@@ -377,6 +377,12 @@ async fn run_remote_compact_task_inner_impl(
     .await?;
     sess.recompute_token_usage(compaction_turn_context).await;
 
+    sess.dsh_record_context_checkpoint(
+        compaction_turn_context,
+        crate::dsh_context_checkpoint::DshCheckpointTrigger::Compaction(compaction_id.as_str()),
+    )
+    .await?;
+
     sess.emit_turn_item_completed(compaction_turn_context, compaction_item)
         .await;
     Ok(())

@@ -33,19 +33,27 @@ async fn checkpoint_fact_preserves_snapshot_and_waits_for_ack() {
             Ok(())
         })
     });
-    record_checkpoint_fact(&binding, "turn-4", snapshot())
+    let turn_checkpoint = DshCheckpointTrigger::Turn.checkpoint_id("turn-4");
+    let compaction_checkpoint =
+        DshCheckpointTrigger::Compaction("compact-1").checkpoint_id("turn-4");
+    record_checkpoint_fact(&binding, "turn-4", &turn_checkpoint, snapshot())
         .await
         .expect("durable ACK");
+    record_checkpoint_fact(&binding, "turn-4", &compaction_checkpoint, snapshot())
+        .await
+        .expect("compaction ACK");
     let facts = facts.lock().expect("facts lock");
-    assert_eq!(facts.len(), 1);
-    assert_eq!(facts[0]["eventId"], "dsh-context-checkpoint-turn-4");
-    assert_eq!(facts[0]["checkpointId"], "turn-4");
+    assert_eq!(facts.len(), 2);
+    assert_eq!(facts[0]["eventId"], "dsh-context-checkpoint-turn:turn-4");
+    assert_eq!(facts[0]["checkpointId"], "turn:turn-4");
     assert_eq!(facts[0]["snapshot"]["kind"], "inline");
     assert_eq!(facts[0]["snapshot"]["value"]["version"], 2);
     assert_eq!(
         facts[0]["effectiveHistorySha256"],
         facts[0]["snapshot"]["value"]["effectiveHistorySha256"]
     );
+    assert_eq!(facts[1]["checkpointId"], "compaction:compact-1");
+    assert_eq!(facts[1]["codexTurnId"], "turn-4");
 }
 
 #[tokio::test]
@@ -53,7 +61,7 @@ async fn failed_ack_rejects_checkpoint_fact() {
     let binding = DshAuditBinding::new("session-a".to_string(), 4, |_| {
         Box::pin(async { anyhow::bail!("storage unavailable") })
     });
-    let error = record_checkpoint_fact(&binding, "turn-4", snapshot())
+    let error = record_checkpoint_fact(&binding, "turn-4", "compaction:compact-1", snapshot())
         .await
         .expect_err("missing ACK");
     assert!(error.to_string().contains("checkpoint audit failed"));
@@ -76,7 +84,7 @@ async fn missing_durable_source_fails_before_append() {
             },
         )));
     let error = session
-        .dsh_record_context_checkpoint(&turn_context)
+        .dsh_record_context_checkpoint(&turn_context, DshCheckpointTrigger::Turn)
         .await
         .expect_err("no durable rollout");
     assert!(error.to_string().contains("durable context"));
