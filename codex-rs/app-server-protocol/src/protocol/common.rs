@@ -1805,6 +1805,13 @@ server_request_definitions! {
         response: v2::DshAuditCursorResponse,
     },
 
+    #[experimental("dshAudit/artifact")]
+    /// Transfer a bounded, verified artifact chunk before referencing it in an audit fact.
+    DshAuditArtifact => "dshAudit/artifact" {
+        params: v2::DshAuditArtifactParams,
+        response: v2::DshAuditArtifactResponse,
+    },
+
     ChatgptAuthTokensRefresh => "account/chatgptAuthTokens/refresh" {
         params: v2::ChatgptAuthTokensRefreshParams,
         response: v2::ChatgptAuthTokensRefreshResponse,
@@ -3050,6 +3057,32 @@ mod tests {
         assert_eq!(
             serde_json::to_value(&empty_cursor)?,
             json!({"version": 1, "sequence": 0, "eventId": null}),
+        );
+        let artifact = ServerRequestPayload::DshAuditArtifact(v2::DshAuditArtifactParams {
+            thread_id: "thread-123".to_string(),
+            sha256: "a".repeat(64),
+            bytes: 3,
+            media_type: "application/json".to_string(),
+            offset: 0,
+            data: "e30=".to_string(),
+        })
+        .request_with_id(RequestId::Integer(13));
+        assert_eq!(
+            serde_json::to_value(&artifact)?["method"],
+            "dshAudit/artifact",
+        );
+        let artifact_ack = v2::DshAuditArtifactResponse {
+            version: 1,
+            sha256: "a".repeat(64),
+            bytes: 3,
+            next_offset: 3,
+            complete: true,
+        };
+        assert_eq!(
+            serde_json::from_value::<v2::DshAuditArtifactResponse>(serde_json::to_value(
+                &artifact_ack
+            )?)?,
+            artifact_ack,
         );
         Ok(())
     }

@@ -6,6 +6,7 @@ use std::fs::File;
 use std::fs::create_dir_all;
 use std::fs::read_dir;
 use std::future::Future;
+use std::io::Read;
 use std::io::Write;
 use std::path::Path;
 use std::path::PathBuf;
@@ -17,8 +18,12 @@ use std::time::UNIX_EPOCH;
 use anyhow::Context;
 use anyhow::Result;
 use anyhow::anyhow;
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD as BASE64;
 use codex_app_server_protocol::DshAuditAppendParams;
 use codex_app_server_protocol::DshAuditAppendResponse;
+use codex_app_server_protocol::DshAuditArtifactParams;
+use codex_app_server_protocol::DshAuditArtifactResponse;
 use codex_app_server_protocol::DshAuditCursorParams;
 use codex_app_server_protocol::DshAuditCursorResponse;
 use codex_app_server_protocol::DshAuditTurn;
@@ -28,7 +33,11 @@ use codex_core::DshCompactionCheckpointStatus;
 use codex_protocol::ThreadId;
 use serde_json::Value;
 use serde_json::json;
+use sha2::Digest;
+use sha2::Sha256;
 use tempfile::NamedTempFile;
+use tokio::io::AsyncReadExt;
+use tokio::io::AsyncSeekExt;
 use tokio::sync::Mutex;
 use tokio::sync::Semaphore;
 use tokio::time::timeout;
@@ -38,6 +47,21 @@ use crate::outgoing_message::ConnectionRequestId;
 use crate::outgoing_message::OutgoingMessageSender;
 
 const DSH_AUDIT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+const DSH_AUDIT_INLINE_LIMIT: u64 = 64 * 1024;
+const DSH_AUDIT_ARTIFACT_CHUNK: usize = 256 * 1024;
+const AUDIT_PAYLOAD_FIELDS: [&str; 11] = [
+    "request",
+    "chunk",
+    "result",
+    "arguments",
+    "inputHistory",
+    "prompt",
+    "effectiveHistory",
+    "details",
+    "config",
+    "response",
+    "snapshot",
+];
 
 fn resolved_compaction_fact(
     pending: &Value,
@@ -99,6 +123,137 @@ struct AuditSpool {
 }
 
 impl AuditSpool {
+    fn artifact_path(&self, sha256: &str) -> Result<PathBuf> {
+        if sha256.len() != 64
+            || !sha256
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err(anyhow!("DSH audit artifact digest is invalid"));
+        }
+        Ok(self
+            .directory
+            .join("artifacts")
+            .join(format!("{sha256}.blob")))
+    }
+
+    fn verify_artifact(&self, sha256: &str, bytes: u64) -> Result<PathBuf> {
+        let path = self.artifact_path(sha256)?;
+        let mut file = File::open(&path).context("DSH audit artifact blob is missing")?;
+        let mut hasher = Sha256::new();
+        let mut actual_bytes = 0_u64;
+        let mut buffer = [0_u8; 64 * 1024];
+        loop {
+            let count = file.read(&mut buffer)?;
+            if count == 0 {
+                break;
+            }
+            hasher.update(&buffer[..count]);
+            actual_bytes = actual_bytes
+                .checked_add(u64::try_from(count)?)
+                .ok_or_else(|| anyhow!("DSH audit artifact size overflow"))?;
+        }
+        if actual_bytes != bytes || format!("{:x}", hasher.finalize()) != sha256 {
+            return Err(anyhow!("DSH audit artifact hash or size differs"));
+        }
+        Ok(path)
+    }
+
+    fn offload_payloads(&self, event: &mut Value) -> Result<()> {
+        let artifact_dir = self.directory.join("artifacts");
+        for field in AUDIT_PAYLOAD_FIELDS {
+            let Some(payload) = event
+                .as_object_mut()
+                .and_then(|object| object.get_mut(field))
+            else {
+                continue;
+            };
+            if payload["kind"] != "inline" {
+                continue;
+            }
+            let Some(value) = payload.get("value") else {
+                return Err(anyhow!("DSH audit inline payload has no value"));
+            };
+            create_dir_all(&artifact_dir)?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&artifact_dir, std::fs::Permissions::from_mode(0o700))?;
+            }
+            let mut temporary = NamedTempFile::new_in(&artifact_dir)?;
+            serde_json::to_writer(&mut temporary, value)?;
+            let bytes = temporary.as_file().metadata()?.len();
+            if bytes <= DSH_AUDIT_INLINE_LIMIT && field != "snapshot" {
+                continue;
+            }
+            temporary.flush()?;
+            temporary.as_file().sync_all()?;
+            let mut hasher = Sha256::new();
+            let mut file = File::open(temporary.path())?;
+            let mut buffer = [0_u8; 64 * 1024];
+            loop {
+                let count = file.read(&mut buffer)?;
+                if count == 0 {
+                    break;
+                }
+                hasher.update(&buffer[..count]);
+            }
+            let sha256 = format!("{:x}", hasher.finalize());
+            let path = self.artifact_path(&sha256)?;
+            if path.exists() {
+                self.verify_artifact(&sha256, bytes)?;
+            } else {
+                temporary
+                    .persist_noclobber(&path)
+                    .context("publish DSH audit artifact")?;
+                #[cfg(unix)]
+                File::open(&artifact_dir)?.sync_all()?;
+            }
+            *payload = json!({
+                "kind": "artifact", "sha256": sha256, "bytes": bytes,
+                "mediaType": "application/json",
+            });
+        }
+        Ok(())
+    }
+
+    fn artifact_refs(event: &Value) -> Result<Vec<(String, u64)>> {
+        let mut refs = Vec::new();
+        for field in AUDIT_PAYLOAD_FIELDS {
+            let Some(payload) = event.get(field) else {
+                continue;
+            };
+            if payload["kind"] != "artifact" {
+                continue;
+            }
+            let sha256 = payload["sha256"]
+                .as_str()
+                .ok_or_else(|| anyhow!("DSH audit artifact has no digest"))?;
+            let bytes = payload["bytes"]
+                .as_u64()
+                .ok_or_else(|| anyhow!("DSH audit artifact has no size"))?;
+            if payload["mediaType"] != "application/json" {
+                return Err(anyhow!("DSH audit artifact media type is unsupported"));
+            }
+            refs.push((sha256.to_string(), bytes));
+        }
+        Ok(refs)
+    }
+
+    fn read_artifact_json(&self, payload: &Value) -> Result<Value> {
+        let sha256 = payload["sha256"]
+            .as_str()
+            .ok_or_else(|| anyhow!("DSH audit artifact has no digest"))?;
+        let bytes = payload["bytes"]
+            .as_u64()
+            .ok_or_else(|| anyhow!("DSH audit artifact has no size"))?;
+        if payload["mediaType"] != "application/json" {
+            return Err(anyhow!("DSH audit artifact media type is unsupported"));
+        }
+        let path = self.verify_artifact(sha256, bytes)?;
+        serde_json::from_reader(File::open(path)?).context("invalid DSH audit artifact JSON")
+    }
+
     fn open(root: &Path, thread_id: &str) -> Result<Self> {
         let thread_uuid = Uuid::parse_str(thread_id).context("invalid DSH audit thread ID")?;
         let directory = root.join(thread_uuid.to_string());
@@ -160,6 +315,7 @@ impl AuditSpool {
             .and_then(Value::as_str)
             .ok_or_else(|| anyhow!("DSH audit fact requires an eventId"))?
             .to_string();
+        self.offload_payloads(&mut event)?;
         if let Some(prior) = self
             .events
             .iter()
@@ -210,6 +366,61 @@ impl AuditSpool {
         }))
     }
 
+    async fn upload_artifacts<F, Fut>(&self, event: &Value, exchange: &mut F) -> Result<()>
+    where
+        F: FnMut(ServerRequestPayload) -> Fut,
+        Fut: Future<Output = Result<Value>>,
+    {
+        let mut seen = HashSet::new();
+        for (sha256, bytes) in Self::artifact_refs(event)? {
+            if !seen.insert(sha256.clone()) {
+                continue;
+            }
+            let path = self.verify_artifact(&sha256, bytes)?;
+            let mut source = tokio::fs::File::open(path).await?;
+            let mut offset = 0_u64;
+            let mut buffer = vec![0_u8; DSH_AUDIT_ARTIFACT_CHUNK];
+            loop {
+                source.seek(std::io::SeekFrom::Start(offset)).await?;
+                let count = source.read(&mut buffer).await?;
+                if count == 0 && offset != bytes {
+                    return Err(anyhow!("DSH audit artifact ended before its declared size"));
+                }
+                let response: DshAuditArtifactResponse = serde_json::from_value(
+                    exchange(ServerRequestPayload::DshAuditArtifact(
+                        DshAuditArtifactParams {
+                            thread_id: self.thread_id.clone(),
+                            sha256: sha256.clone(),
+                            bytes,
+                            media_type: "application/json".to_string(),
+                            offset,
+                            data: BASE64.encode(&buffer[..count]),
+                        },
+                    ))
+                    .await?,
+                )?;
+                if response.version != 1
+                    || response.sha256 != sha256
+                    || response.bytes != bytes
+                    || response.next_offset > bytes
+                    || (response.complete && response.next_offset != bytes)
+                {
+                    return Err(anyhow!(
+                        "DSH audit artifact acknowledgment conflicts with spool"
+                    ));
+                }
+                if response.complete {
+                    break;
+                }
+                if response.next_offset == offset {
+                    return Err(anyhow!("DSH audit artifact transfer made no progress"));
+                }
+                offset = response.next_offset;
+            }
+        }
+        Ok(())
+    }
+
     async fn reconcile<F, Fut>(&self, mut exchange: F) -> Result<()>
     where
         F: FnMut(ServerRequestPayload) -> Fut,
@@ -231,6 +442,7 @@ impl AuditSpool {
             return Err(anyhow!("DSH audit cursor conflicts with the fork spool"));
         }
         for event in &self.events[committed..] {
+            self.upload_artifacts(event, &mut exchange).await?;
             let ack: DshAuditAppendResponse = serde_json::from_value(
                 exchange(ServerRequestPayload::DshAuditAppend(DshAuditAppendParams {
                     thread_id: self.thread_id.clone(),
@@ -365,11 +577,22 @@ impl DshAuditManager {
             let compaction_id = pending["compactionId"]
                 .as_str()
                 .ok_or_else(|| anyhow!("pending DSH compaction has no compactionId"))?;
-            let effective_history = pending["effectiveHistory"]["value"]
-                .as_array()
-                .ok_or_else(|| anyhow!("pending DSH compaction history is not inline JSON"))?;
+            let effective_history = match pending["effectiveHistory"]["kind"].as_str() {
+                Some("inline") => pending["effectiveHistory"]["value"].clone(),
+                Some("artifact") => spool.read_artifact_json(&pending["effectiveHistory"])?,
+                _ => {
+                    return Err(anyhow!(
+                        "pending DSH compaction history has no valid payload"
+                    ));
+                }
+            };
+            if !effective_history.is_array() {
+                return Err(anyhow!(
+                    "pending DSH compaction history is not a JSON array"
+                ));
+            }
             let status = thread
-                .dsh_compaction_checkpoint_status(compaction_id, &json!(effective_history))
+                .dsh_compaction_checkpoint_status(compaction_id, &effective_history)
                 .await
                 .context("read durable DSH compaction checkpoint")?;
             let prior_rollout_sha256 = if status == DshCompactionCheckpointStatus::Absent {
@@ -587,6 +810,9 @@ mod tests {
         event_id: Option<String>,
         appends: usize,
         lose_first_ack: bool,
+        lose_first_artifact_ack: bool,
+        artifact_chunks: usize,
+        artifacts: HashMap<String, Vec<u8>>,
     }
 
     fn exchange(
@@ -610,6 +836,34 @@ mod tests {
                     } else {
                         Ok(json!({
                             "version": 1, "sequence": remote.sequence, "eventId": remote.event_id,
+                        }))
+                    }
+                }
+                ServerRequestPayload::DshAuditArtifact(params) => {
+                    let (next_offset, complete) = {
+                        let stored = remote.artifacts.entry(params.sha256.clone()).or_default();
+                        if params.offset == u64::try_from(stored.len()).expect("stored size") {
+                            stored.extend(
+                                BASE64.decode(params.data).expect("canonical base64 chunk"),
+                            );
+                        }
+                        let next_offset = u64::try_from(stored.len()).expect("stored size");
+                        if next_offset == params.bytes {
+                            assert_eq!(format!("{:x}", Sha256::digest(stored)), params.sha256);
+                        }
+                        (next_offset, next_offset == params.bytes)
+                    };
+                    remote.artifact_chunks += 1;
+                    if remote.lose_first_artifact_ack {
+                        remote.lose_first_artifact_ack = false;
+                        Err(anyhow!("artifact ACK lost after durable chunk"))
+                    } else {
+                        Ok(json!({
+                            "version": 1,
+                            "sha256": params.sha256,
+                            "bytes": params.bytes,
+                            "nextOffset": next_offset,
+                            "complete": complete,
                         }))
                     }
                 }
@@ -757,6 +1011,127 @@ mod tests {
         let remote = remote.lock().expect("remote lock");
         assert_eq!(remote.sequence, 2);
         assert_eq!(remote.appends, 2);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn large_prompt_is_spooled_and_uploaded_before_audited_fact() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let thread_id = Uuid::now_v7().to_string();
+        let prompt = json!({"fullPrompt": "model input".repeat(70_000)});
+        let remote = Arc::new(StdMutex::new(Remote {
+            lose_first_ack: true,
+            lose_first_artifact_ack: true,
+            ..Default::default()
+        }));
+        let mut spool = AuditSpool::open(root.path(), &thread_id)?;
+        spool.record(json!({
+            "eventId": "model-request-large",
+            "turn": 1,
+            "kind": "model/request",
+            "attemptId": "attempt-1",
+            "purpose": "inference",
+            "stage": "model-visible",
+            "apiFormat": "responses",
+            "request": { "kind": "inline", "value": prompt },
+        }))?;
+        let reference = &spool.events[0]["request"];
+        assert_eq!(reference["kind"], "artifact");
+        assert_eq!(reference["mediaType"], "application/json");
+        let sha256 = reference["sha256"]
+            .as_str()
+            .expect("artifact digest")
+            .to_string();
+        assert!(spool.artifact_path(&sha256)?.exists());
+        assert!(
+            spool
+                .reconcile(exchange(Arc::clone(&remote)))
+                .await
+                .is_err()
+        );
+        {
+            let remote = remote.lock().expect("remote lock");
+            assert_eq!(remote.sequence, 0);
+            assert_eq!(remote.artifact_chunks, 1);
+        }
+        drop(spool);
+        let resumed = AuditSpool::open(root.path(), &thread_id)?;
+        assert!(
+            resumed
+                .reconcile(exchange(Arc::clone(&remote)))
+                .await
+                .is_err()
+        );
+        {
+            let remote = remote.lock().expect("remote lock");
+            assert_eq!(remote.sequence, 1);
+            assert!(remote.artifact_chunks >= 4);
+            let data = remote.artifacts.get(&sha256).expect("uploaded artifact");
+            assert_eq!(serde_json::from_slice::<Value>(data)?, prompt);
+        }
+        drop(resumed);
+        AuditSpool::open(root.path(), &thread_id)?
+            .reconcile(exchange(Arc::clone(&remote)))
+            .await?;
+        assert_eq!(remote.lock().expect("remote lock").appends, 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn missing_artifact_stops_fact_before_remote_ack_and_pending_can_be_reloaded()
+    -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let thread_id = Uuid::now_v7().to_string();
+        let history = json!(["compacted".repeat(80_000)]);
+        let mut spool = AuditSpool::open(root.path(), &thread_id)?;
+        spool.record(json!({
+            "eventId": "dsh-compaction-pending-large",
+            "turn": 1,
+            "kind": "compaction/pending",
+            "compactionId": "compact-large",
+            "effectiveHistory": { "kind": "inline", "value": history },
+        }))?;
+        let payload = &spool.events[0]["effectiveHistory"];
+        assert_eq!(payload["kind"], "artifact");
+        assert_eq!(spool.read_artifact_json(payload)?, history);
+        let path = spool.artifact_path(payload["sha256"].as_str().expect("digest"))?;
+        std::fs::remove_file(path)?;
+        let remote = Arc::new(StdMutex::new(Remote::default()));
+        assert!(
+            spool
+                .reconcile(exchange(Arc::clone(&remote)))
+                .await
+                .is_err()
+        );
+        assert_eq!(remote.lock().expect("remote lock").sequence, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn image_payload_and_small_checkpoint_use_verified_artifacts() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let thread_id = Uuid::now_v7().to_string();
+        let mut spool = AuditSpool::open(root.path(), &thread_id)?;
+        let image = json!({"image": format!("data:image/png;base64,{}", "A".repeat(90_000))});
+        spool.record(json!({
+            "eventId": "image-request", "turn": 1, "kind": "model/request",
+            "request": { "kind": "inline", "value": image },
+        }))?;
+        let snapshot = json!({"history": ["small checkpoint"]});
+        spool.record(json!({
+            "eventId": "checkpoint-small", "turn": 1, "kind": "checkpoint",
+            "snapshot": { "kind": "inline", "value": snapshot },
+        }))?;
+        assert_eq!(spool.events[0]["request"]["kind"], "artifact");
+        assert_eq!(
+            spool.read_artifact_json(&spool.events[0]["request"])?,
+            image
+        );
+        assert_eq!(spool.events[1]["snapshot"]["kind"], "artifact");
+        assert_eq!(
+            spool.read_artifact_json(&spool.events[1]["snapshot"])?,
+            snapshot
+        );
         Ok(())
     }
 }

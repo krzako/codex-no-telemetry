@@ -42,6 +42,31 @@ pub struct DshAuditCursorResponse {
     pub event_id: Option<String>,
 }
 
+/// One bounded base64 chunk of a session-owned, content-addressed audit artifact.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct DshAuditArtifactParams {
+    pub thread_id: String,
+    pub sha256: String,
+    pub bytes: u64,
+    pub media_type: String,
+    pub offset: u64,
+    pub data: String,
+}
+
+/// A chunk offset is confirmed after fsync; complete requires both file and Session receipt.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct DshAuditArtifactResponse {
+    pub version: u32,
+    pub sha256: String,
+    pub bytes: u64,
+    pub next_offset: u64,
+    pub complete: bool,
+}
+
 /// The DSH Session and turn that own a `turn/start` audit preflight.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
