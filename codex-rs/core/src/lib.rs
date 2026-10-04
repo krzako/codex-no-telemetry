@@ -41,6 +41,7 @@ mod dsh_context_source;
 pub use dsh_context_source::DshContextSource;
 mod dsh_context_snapshot;
 pub use dsh_context_snapshot::DshContextSnapshotV2;
+mod dsh_context_checkpoint;
 mod thread_startup_metadata;
 pub use codex_network_proxy::EnvironmentNetworkPolicy;
 pub use codex_network_proxy::NetworkDomainPermission;

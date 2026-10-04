@@ -681,6 +681,19 @@ impl Session {
             PersistContext::Standard,
         )
         .await;
+        if let Err(err) = self
+            .dsh_record_context_checkpoint(turn_context.as_ref())
+            .await
+        {
+            self.emit_turn_error_lifecycle(turn_context.as_ref(), err.to_codex_protocol_error())
+                .await;
+            self.track_turn_codex_error(turn_context.as_ref(), &err);
+            self.send_event(
+                turn_context.as_ref(),
+                EventMsg::Error(err.to_error_event(/*message_prefix*/ None)),
+            )
+            .await;
+        }
         let turn_telemetry = &turn_context.session_telemetry;
         // Emit token usage metrics.
         {
