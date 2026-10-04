@@ -689,7 +689,7 @@ impl TurnRequestProcessor {
                     thread_id,
                     thread.as_ref(),
                     &audit_turn,
-                    audit_config,
+                    audit_config.clone(),
                 )
                 .await
                 .map_err(|err| internal_error(format!("DSH audit preflight failed: {err}")))?;
@@ -699,9 +699,10 @@ impl TurnRequestProcessor {
             let audit = Arc::clone(&self.dsh_audit);
             let audit_request_id = request_id.clone();
             registry
-                .insert(DshAuditBinding::new(
+                .insert(DshAuditBinding::with_context_config(
                     audit_turn.session_id,
                     audit_turn.turn,
+                    audit_config,
                     move |fact| {
                         let audit = Arc::clone(&audit);
                         let request_id = audit_request_id.clone();

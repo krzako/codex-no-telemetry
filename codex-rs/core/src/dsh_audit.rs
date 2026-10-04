@@ -21,6 +21,7 @@ type Append = dyn Fn(Value) -> BoxFuture<'static, Result<()>> + Send + Sync;
 pub struct DshAuditBinding {
     session_id: String,
     turn: u64,
+    context_config: Option<Value>,
     append: Arc<Append>,
     append_gate: AsyncMutex<()>,
     failed: AtomicBool,
@@ -45,10 +46,23 @@ impl DshAuditBinding {
         Self {
             session_id,
             turn,
+            context_config: None,
             append: Arc::new(append),
             append_gate: AsyncMutex::new(()),
             failed: AtomicBool::new(false),
         }
+    }
+
+    /// Bind the credential-free configuration whose `context/config` fact DSH already acknowledged.
+    pub fn with_context_config(
+        session_id: String,
+        turn: u64,
+        context_config: Value,
+        append: impl Fn(Value) -> BoxFuture<'static, Result<()>> + Send + Sync + 'static,
+    ) -> Self {
+        let mut binding = Self::new(session_id, turn, append);
+        binding.context_config = Some(context_config);
+        binding
     }
 
     pub fn session_id(&self) -> &str {
@@ -57,6 +71,11 @@ impl DshAuditBinding {
 
     pub fn turn(&self) -> u64 {
         self.turn
+    }
+
+    /// The accepted configuration of this turn, if its app-server preflight supplied one.
+    pub fn context_config(&self) -> Option<&Value> {
+        self.context_config.as_ref()
     }
 
     /// Await the host's durable acknowledgment before dependent work proceeds.
@@ -235,6 +254,37 @@ mod tests {
             .expect("host ACK");
         assert!(registry.take(3).is_none());
         assert!(registry.take(4).is_none());
+    }
+
+    #[test]
+    fn accepted_context_config_is_immutable_and_isolated_by_turn() {
+        let registry = DshAuditBindingRegistry::default();
+        let mut accepted = json!({ "model": "first", "instructions": "keep" });
+        registry
+            .insert(DshAuditBinding::with_context_config(
+                "session-a".to_string(),
+                1,
+                accepted.clone(),
+                |_| Box::pin(async { Ok(()) }),
+            ))
+            .expect("first turn");
+        accepted["model"] = json!("changed in caller");
+        registry
+            .insert(DshAuditBinding::with_context_config(
+                "session-a".to_string(),
+                2,
+                json!({ "model": "second" }),
+                |_| Box::pin(async { Ok(()) }),
+            ))
+            .expect("second turn");
+        assert_eq!(
+            registry.take(1).expect("first binding").context_config(),
+            Some(&json!({ "model": "first", "instructions": "keep" }))
+        );
+        assert_eq!(
+            registry.take(2).expect("second binding").context_config(),
+            Some(&json!({ "model": "second" }))
+        );
     }
 
     #[tokio::test]
