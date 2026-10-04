@@ -30,6 +30,7 @@ pub struct DshCompactionStateV2 {
 #[serde(rename_all = "camelCase")]
 pub struct DshContextSnapshotV2 {
     pub version: u8,
+    pub hash_algorithm: String,
     pub runtime_revision: String,
     pub history_version: u64,
     pub effective_history: Vec<ResponseItemEnvelope>,
@@ -92,20 +93,80 @@ impl DshContextSource {
                 window_id: checkpoint.window_id.clone(),
             });
         }
-        let history = serde_json::to_vec(&self.effective_history)?;
+        // Hash the JSON value that the audit channel actually transports. Its
+        // object keys are normalized by serde_json::Value, not the original
+        // Rust struct field order. Numbers use IEEE-754 bits so JS and Rust
+        // agree even when their JSON number printers differ.
+        let history_hash = dsh_json_sha256(&serde_json::to_value(&self.effective_history)?)?;
+        let portable_rollout_hash = dsh_json_sha256(&serde_json::to_value(&self.rollout)?)?;
         Ok(DshContextSnapshotV2 {
             version: 2,
+            hash_algorithm: "dsh-json-v1".to_string(),
             runtime_revision,
             history_version: self.history_version,
             effective_history: self.effective_history,
-            effective_history_sha256: format!("{:x}", Sha256::digest(history)),
+            effective_history_sha256: history_hash,
             retained_context: self.retained_context,
             compactions,
             rollout: self.rollout,
-            rollout_sha256: self.rollout_sha256,
+            rollout_sha256: portable_rollout_hash,
             context_config,
         })
     }
+}
+
+/// SHA-256 of typed JSON values, independent of object field order or numeric print style.
+fn dsh_json_sha256(value: &Value) -> Result<String> {
+    fn write_len(hash: &mut Sha256, len: usize) -> Result<()> {
+        hash.update(u64::try_from(len)?.to_be_bytes());
+        Ok(())
+    }
+
+    fn write_value(hash: &mut Sha256, value: &Value) -> Result<()> {
+        match value {
+            Value::Null => hash.update(b"N"),
+            Value::Bool(false) => hash.update(b"F"),
+            Value::Bool(true) => hash.update(b"T"),
+            Value::Number(number) => {
+                hash.update(b"D");
+                let value = number
+                    .as_f64()
+                    .ok_or_else(|| anyhow!("DSH JSON number cannot be represented as f64"))?;
+                ensure!(value.is_finite(), "DSH JSON number is not finite");
+                hash.update(value.to_bits().to_be_bytes());
+            }
+            Value::String(text) => {
+                hash.update(b"S");
+                write_len(hash, text.len())?;
+                hash.update(text.as_bytes());
+            }
+            Value::Array(items) => {
+                hash.update(b"A");
+                write_len(hash, items.len())?;
+                for item in items {
+                    write_value(hash, item)?;
+                }
+            }
+            Value::Object(properties) => {
+                hash.update(b"O");
+                write_len(hash, properties.len())?;
+                let mut entries: Vec<_> = properties.iter().collect();
+                entries.sort_unstable_by(|(left, _), (right, _)| {
+                    left.as_bytes().cmp(right.as_bytes())
+                });
+                for (key, item) in entries {
+                    write_len(hash, key.len())?;
+                    hash.update(key.as_bytes());
+                    write_value(hash, item)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    let mut hash = Sha256::new();
+    write_value(&mut hash, value)?;
+    Ok(format!("{:x}", hash.finalize()))
 }
 
 #[cfg(test)]

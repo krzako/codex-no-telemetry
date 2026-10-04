@@ -70,6 +70,7 @@ fn preserves_effective_history_config_and_compaction_chain() {
         .into_portable_snapshot(config())
         .expect("portable snapshot");
     assert_eq!(snapshot.version, 2);
+    assert_eq!(snapshot.hash_algorithm, "dsh-json-v1");
     assert_eq!(snapshot.runtime_revision, "fork-abc");
     assert_eq!(snapshot.compactions.len(), 2);
     assert_eq!(snapshot.compactions[0].id, "first");
@@ -82,21 +83,29 @@ fn preserves_effective_history_config_and_compaction_chain() {
     assert_eq!(snapshot.effective_history, vec![message()]);
     assert_eq!(
         snapshot.effective_history_sha256,
-        format!(
-            "{:x}",
-            Sha256::digest(serde_json::to_vec(&snapshot.effective_history).expect("history"))
-        )
+        dsh_json_sha256(&serde_json::to_value(&snapshot.effective_history).expect("history"))
+            .expect("canonical history")
     );
     let serialized = serde_json::to_value(&snapshot).expect("serialize snapshot");
     // The DSH fixture `agent-codex/tests/fixtures/context-snapshot-v2-rust.json`
     // is generated from this snapshot; these anchors detect serialization drift.
     assert_eq!(
         snapshot.effective_history_sha256,
-        "2e7a4c4074e9d49b76f303800f3e16a1fd69b29ad7b7925e10187708583413fa"
+        "7c7e583c7f996b435ba1f715a6e57462537c7c85b510a3c0b7475f4f885429a0"
     );
     assert_eq!(
         snapshot.rollout_sha256,
-        "519b57c72105b67760f31c06daa90aa65f2cd606c2507c9e979b4dbaf5ea94c5"
+        "5b9cdc10d41c6f08b87c348361738d2191a4c8e6bd2bdc093755a38b3bbb7632"
+    );
+    let audit_value = json!({ "snapshot": { "kind": "inline", "value": snapshot } });
+    let transmitted = &audit_value["snapshot"]["value"];
+    assert_eq!(
+        transmitted["effectiveHistorySha256"],
+        dsh_json_sha256(&transmitted["effectiveHistory"]).expect("transmitted history")
+    );
+    assert_eq!(
+        transmitted["rolloutSha256"],
+        dsh_json_sha256(&transmitted["rollout"]).expect("transmitted rollout")
     );
     assert_eq!(serialized["rolloutSha256"], snapshot.rollout_sha256);
     assert!(serialized.get("rolloutPath").is_none());
@@ -117,4 +126,19 @@ fn rejects_legacy_or_duplicate_compaction_identity() {
     let mut changed_rollout = source(vec![compaction(Some("valid"))]);
     changed_rollout.rollout_sha256 = "0".repeat(64);
     assert!(changed_rollout.into_portable_snapshot(config()).is_err());
+}
+
+#[test]
+fn canonical_json_hash_covers_float_bits_and_utf8_key_order() {
+    let value = json!({
+        "10": 1e21,
+        "2": -0.0,
+        "nested": [1.0, 1e-7, 9_007_199_254_740_993_u64],
+        "\u{e000}": "private-use",
+        "😀": "supplementary",
+    });
+    assert_eq!(
+        dsh_json_sha256(&value).expect("canonical JSON"),
+        "b4b42ba5e7880e91469e8b01bdabf4a33bb05ed83b6583078e07af8e4cde2a9f"
+    );
 }
