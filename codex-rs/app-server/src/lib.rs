@@ -108,6 +108,7 @@ mod connection_rpc_gate;
 mod current_time;
 mod daemon_thread_recovery;
 mod dsh_audit;
+mod dsh_config_audit;
 mod dynamic_tools;
 mod effective_plugin_change;
 mod error_code;

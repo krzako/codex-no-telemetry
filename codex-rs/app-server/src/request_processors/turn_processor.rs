@@ -19,6 +19,7 @@ use codex_protocol::protocol::TurnSettingsUpdateOutcome;
 use codex_skills::system_cache_root_dir;
 
 use crate::dsh_audit::DshAuditManager;
+use crate::dsh_config_audit::turn_context_config;
 use crate::image_url::REMOTE_IMAGE_URL_ERROR;
 use crate::image_url::is_remote_image_url;
 
@@ -539,12 +540,6 @@ impl TurnRequestProcessor {
         }
         let is_dsh_client = app_server_client_name.as_deref() == Some("deepseek-harness");
         let audit_turn = params.dsh_audit.clone();
-        let audit_config = serde_json::json!({
-            "sessionId": audit_turn.as_ref().map(|turn| turn.session_id.as_str()),
-            "requestedModel": params.model,
-            "reasoningEffort": params.effort,
-            "dynamicTools": params.dynamic_tools,
-        });
         let (thread_id, thread) =
             self.load_thread(&params.thread_id)
                 .await
@@ -675,6 +670,19 @@ impl TurnRequestProcessor {
                     "DSH audit Session and turn must be nonempty",
                 ));
             }
+            let config = thread.config().await;
+            let baseline = thread.thread_settings_snapshot().await;
+            let instruction_sources = thread.instruction_sources().await;
+            let fork_revision = std::env::var("DSH_CODEX_REVISION").ok();
+            let audit_config = turn_context_config(
+                &audit_turn.session_id,
+                &config,
+                &baseline,
+                &thread_settings,
+                &instruction_sources,
+                params.dynamic_tools.as_deref(),
+                fork_revision.as_deref(),
+            );
             self.dsh_audit
                 .before_turn(
                     &request_id,
