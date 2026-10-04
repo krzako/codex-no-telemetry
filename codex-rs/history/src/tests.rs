@@ -162,6 +162,26 @@ fn response_item_envelope_accessors_preserve_item() {
 }
 
 #[test]
+fn response_item_envelope_audit_json_round_trips_metadata_without_changing_rollout_format()
+-> Result<()> {
+    let expected = ResponseItemEnvelope {
+        item: response_message("user"),
+        metadata: Some(CodexHarnessMetadata {
+            client_authored: true,
+            compaction_model_hash: Some("model-hash".to_string()),
+            ..Default::default()
+        }),
+    };
+
+    let json = serde_json::to_value(&expected)?;
+    assert_eq!(
+        serde_json::from_value::<ResponseItemEnvelope>(json)?,
+        expected
+    );
+    Ok(())
+}
+
+#[test]
 /// Keeps legacy response-item rollout lines readable and byte-shape compatible.
 fn response_item_rollout_line_preserves_shape() -> Result<()> {
     let legacy_line = json!({

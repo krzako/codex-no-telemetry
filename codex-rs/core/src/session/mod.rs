@@ -19,6 +19,7 @@ use crate::agents_md_manager::SessionInstructions;
 use crate::attestation::AttestationProvider;
 use crate::compact;
 use crate::compact::CompactedHistoryMetadata;
+use crate::compaction_audit;
 use crate::config::ManagedFeatures;
 use crate::config::resolve_tool_suggest_config_from_layer_stack;
 use crate::context::ContextualUserFragment;
@@ -506,10 +507,12 @@ pub(crate) const SUBMISSION_CHANNEL_CAPACITY: usize = 512;
 const CYBER_VERIFY_URL: &str = "https://chatgpt.com/cyber";
 const CYBER_SAFETY_URL: &str = "https://developers.openai.com/codex/concepts/cyber-safety";
 
-#[derive(Clone, Copy)]
 enum CompactionPersistence {
     BestEffort,
-    Required,
+    Required {
+        compaction_id: String,
+        audit: Arc<crate::dsh_audit::DshAuditBinding>,
+    },
 }
 
 impl Session {
@@ -3961,13 +3964,17 @@ impl Session {
     pub(crate) async fn replace_compacted_history_for_turn(
         &self,
         turn_context: &TurnContext,
+        compaction_id: &str,
         items: Vec<ResponseItemEnvelope>,
         reference_context_item: Option<TurnContextItem>,
         world_state_baseline: Option<Arc<WorldState>>,
         metadata: CompactedHistoryMetadata,
     ) -> CodexResult<()> {
-        let persistence = if turn_context.dsh_audit_binding().is_some() {
-            CompactionPersistence::Required
+        let persistence = if let Some(audit) = turn_context.dsh_audit_binding() {
+            CompactionPersistence::Required {
+                compaction_id: compaction_id.to_string(),
+                audit,
+            }
         } else {
             CompactionPersistence::BestEffort
         };
@@ -3989,7 +3996,9 @@ impl Session {
         metadata: CompactedHistoryMetadata,
         persistence: CompactionPersistence,
     ) -> CodexResult<()> {
-        if matches!(persistence, CompactionPersistence::Required) && self.live_thread().is_none() {
+        if matches!(persistence, CompactionPersistence::Required { .. })
+            && self.live_thread().is_none()
+        {
             return Err(CodexErr::Fatal(
                 "DSH compaction requires durable thread persistence".to_string(),
             ));
@@ -4027,8 +4036,16 @@ impl Session {
         // Wait for accepted updates to finish persisting, then keep later updates from
         // overtaking the current settings snapshot while its checkpoint is written.
         let _settings_guard = thread_settings::acquire_persistence_lock(self).await;
+        if let CompactionPersistence::Required {
+            compaction_id,
+            audit,
+        } = &persistence
+        {
+            compaction_audit::record_pending(Arc::clone(audit), compaction_id, &items).await?;
+        }
         // Compaction starts a new history window, so its WorldState baseline must be full.
         let mut world_state_item = None;
+        let installed_history;
         {
             let mut state = self.state.lock().await;
             state.replace_annotated_history(
@@ -4038,6 +4055,7 @@ impl Session {
                     reviewer_compaction_hash: metadata.reviewer_compaction_hash,
                 },
             );
+            installed_history = state.history.annotated_items().to_vec();
             compacted_item.guardian_history = state.history.guardian_history_checkpoint();
             compacted_item.retained_context = Some(state.history.retained_context().clone());
             state.reasoning_effort_pin = ReasoningEffortPin::Compacted;
@@ -4060,9 +4078,9 @@ impl Session {
         rollout_items.push(RolloutItem::EventMsg(
             thread_settings::applied_event(self).await,
         ));
-        match persistence {
+        match &persistence {
             CompactionPersistence::BestEffort => self.persist_rollout_items(&rollout_items).await,
-            CompactionPersistence::Required => {
+            CompactionPersistence::Required { .. } => {
                 let live_thread = self
                     .live_thread_for_persistence("record DSH compaction")
                     .map_err(|error| CodexErr::Fatal(error.to_string()))?;
@@ -4080,6 +4098,18 @@ impl Session {
                     ))
                 })?;
             }
+        }
+        if let CompactionPersistence::Required {
+            compaction_id,
+            audit,
+        } = &persistence
+        {
+            compaction_audit::record_installed(
+                Arc::clone(audit),
+                compaction_id,
+                &installed_history,
+            )
+            .await?;
         }
         {
             let mut state = self.state.lock().await;

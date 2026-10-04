@@ -5,6 +5,7 @@ use std::sync::Arc;
 use crate::Prompt;
 use crate::dsh_audit::DshAuditBinding;
 use crate::responses_metadata::CompactionTurnMetadata;
+use codex_history::ResponseItemEnvelope;
 use codex_protocol::error::CodexErr;
 use codex_protocol::error::Result as CodexResult;
 use codex_protocol::models::ResponseItem;
@@ -93,6 +94,40 @@ pub(crate) async fn record_failure(
         }))
         .await
         .map_err(|error| CodexErr::Fatal(format!("DSH compaction audit failed: {error}")))
+}
+
+pub(crate) async fn record_pending(
+    binding: Arc<DshAuditBinding>,
+    compaction_id: &str,
+    effective_history: &[ResponseItemEnvelope],
+) -> CodexResult<()> {
+    binding
+        .append(json!({
+            "eventId": format!("dsh-compaction-pending-{compaction_id}"),
+            "turn": binding.turn(),
+            "kind": "compaction/pending",
+            "compactionId": compaction_id,
+            "effectiveHistory": { "kind": "inline", "value": effective_history },
+        }))
+        .await
+        .map_err(|error| CodexErr::Fatal(format!("DSH compaction pending audit failed: {error}")))
+}
+
+pub(crate) async fn record_installed(
+    binding: Arc<DshAuditBinding>,
+    compaction_id: &str,
+    effective_history: &[ResponseItemEnvelope],
+) -> CodexResult<()> {
+    binding
+        .append(json!({
+            "eventId": format!("dsh-compaction-installed-{compaction_id}"),
+            "turn": binding.turn(),
+            "kind": "compaction/installed",
+            "compactionId": compaction_id,
+            "effectiveHistory": { "kind": "inline", "value": effective_history },
+        }))
+        .await
+        .map_err(|error| CodexErr::Fatal(format!("DSH compaction installed audit failed: {error}")))
 }
 
 #[cfg(test)]

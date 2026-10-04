@@ -39,9 +39,10 @@ use serde::de::Error as _;
 /// A model-history item with room for history-only metadata.
 ///
 /// Persistence keeps the response item intact and stores its metadata separately.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct ResponseItemEnvelope {
     pub item: ResponseItem,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metadata: Option<CodexHarnessMetadata>,
 }
 

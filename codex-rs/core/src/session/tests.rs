@@ -4547,11 +4547,41 @@ async fn test_compaction_metadata(session: &Session) -> CompactedHistoryMetadata
     }
 }
 
+fn test_compaction_audit(
+    facts: Arc<std::sync::Mutex<Vec<serde_json::Value>>>,
+    fail_kind: Option<&'static str>,
+) -> Arc<crate::dsh_audit::DshAuditBinding> {
+    Arc::new(crate::dsh_audit::DshAuditBinding::new(
+        "session-a".to_string(),
+        1,
+        move |fact| {
+            let facts = Arc::clone(&facts);
+            Box::pin(async move {
+                if fact["kind"].as_str() == fail_kind {
+                    anyhow::bail!("injected audit failure")
+                }
+                facts.lock().expect("audit facts lock").push(fact);
+                Ok(())
+            })
+        },
+    ))
+}
+
+fn required_compaction_persistence(
+    audit: Arc<crate::dsh_audit::DshAuditBinding>,
+) -> CompactionPersistence {
+    CompactionPersistence::Required {
+        compaction_id: "compaction-1".to_string(),
+        audit,
+    }
+}
+
 #[tokio::test]
 async fn required_compaction_checkpoint_refuses_missing_thread_before_history_replacement() {
     let (session, _) = make_session_and_context().await;
     let before = session.clone_history().await.annotated_items().to_vec();
     let metadata = test_compaction_metadata(&session).await;
+    let facts = Arc::new(std::sync::Mutex::new(Vec::new()));
 
     let error = session
         .replace_compacted_history_with_persistence(
@@ -4559,7 +4589,7 @@ async fn required_compaction_checkpoint_refuses_missing_thread_before_history_re
             /*reference_context_item*/ None,
             /*world_state_baseline*/ None,
             metadata,
-            CompactionPersistence::Required,
+            required_compaction_persistence(test_compaction_audit(Arc::clone(&facts), None)),
         )
         .await
         .expect_err("missing persistence must stop compaction");
@@ -4570,6 +4600,7 @@ async fn required_compaction_checkpoint_refuses_missing_thread_before_history_re
             .contains("requires durable thread persistence")
     );
     assert_eq!(session.clone_history().await.annotated_items(), before);
+    assert!(facts.lock().expect("audit facts lock").is_empty());
 }
 
 #[tokio::test]
@@ -4583,6 +4614,7 @@ async fn required_compaction_checkpoint_propagates_append_failure() {
         .await
         .expect("discard live thread to simulate failed append");
     let metadata = test_compaction_metadata(&session).await;
+    let facts = Arc::new(std::sync::Mutex::new(Vec::new()));
 
     let error = session
         .replace_compacted_history_with_persistence(
@@ -4590,7 +4622,7 @@ async fn required_compaction_checkpoint_propagates_append_failure() {
             /*reference_context_item*/ None,
             /*world_state_baseline*/ None,
             metadata,
-            CompactionPersistence::Required,
+            required_compaction_persistence(test_compaction_audit(Arc::clone(&facts), None)),
         )
         .await
         .expect_err("failed append must stop compaction");
@@ -4600,6 +4632,11 @@ async fn required_compaction_checkpoint_propagates_append_failure() {
             .to_string()
             .contains("failed to record DSH compaction checkpoint")
     );
+    assert_eq!(
+        facts.lock().expect("audit facts lock")[0]["kind"],
+        "compaction/pending"
+    );
+    assert_eq!(facts.lock().expect("audit facts lock").len(), 1);
 }
 
 #[tokio::test]
@@ -4607,6 +4644,7 @@ async fn required_compaction_checkpoint_is_durable_before_returning() {
     let (mut session, _) = make_session_and_context().await;
     let rollout_path = attach_thread_persistence(&mut session).await;
     let metadata = test_compaction_metadata(&session).await;
+    let facts = Arc::new(std::sync::Mutex::new(Vec::new()));
 
     session
         .replace_compacted_history_with_persistence(
@@ -4614,7 +4652,7 @@ async fn required_compaction_checkpoint_is_durable_before_returning() {
             /*reference_context_item*/ None,
             /*world_state_baseline*/ None,
             metadata,
-            CompactionPersistence::Required,
+            required_compaction_persistence(test_compaction_audit(Arc::clone(&facts), None)),
         )
         .await
         .expect("durable checkpoint");
@@ -4622,6 +4660,82 @@ async fn required_compaction_checkpoint_is_durable_before_returning() {
     let (items, _, _) = RolloutRecorder::load_rollout_items(&rollout_path)
         .await
         .expect("read flushed rollout");
+    assert!(
+        items
+            .iter()
+            .any(|item| matches!(item, RolloutItem::Compacted(_)))
+    );
+    let installed_history = serde_json::to_value(session.clone_history().await.annotated_items())
+        .expect("serialize installed history");
+    let facts = facts.lock().expect("audit facts lock");
+    assert_eq!(facts.len(), 2);
+    assert_eq!(facts[0]["kind"], "compaction/pending");
+    assert_eq!(facts[1]["kind"], "compaction/installed");
+    assert_eq!(facts[0]["effectiveHistory"], facts[1]["effectiveHistory"]);
+    assert_eq!(facts[1]["effectiveHistory"]["value"], installed_history);
+}
+
+#[tokio::test]
+async fn required_compaction_checkpoint_refuses_pending_audit_before_installation() {
+    let (mut session, _) = make_session_and_context().await;
+    let rollout_path = attach_thread_persistence(&mut session).await;
+    let before = session.clone_history().await.annotated_items().to_vec();
+    let metadata = test_compaction_metadata(&session).await;
+    let facts = Arc::new(std::sync::Mutex::new(Vec::new()));
+
+    let error = session
+        .replace_compacted_history_with_persistence(
+            vec![ResponseItemEnvelope::new(user_message("compacted history"))],
+            /*reference_context_item*/ None,
+            /*world_state_baseline*/ None,
+            metadata,
+            required_compaction_persistence(test_compaction_audit(
+                Arc::clone(&facts),
+                Some("compaction/pending"),
+            )),
+        )
+        .await
+        .expect_err("pending audit refusal must prevent installation");
+
+    assert!(error.to_string().contains("pending audit failed"));
+    assert!(facts.lock().expect("audit facts lock").is_empty());
+    assert_eq!(session.clone_history().await.annotated_items(), before);
+    let (items, _, _) = RolloutRecorder::load_rollout_items(&rollout_path)
+        .await
+        .expect("read rollout");
+    assert!(
+        !items
+            .iter()
+            .any(|item| matches!(item, RolloutItem::Compacted(_)))
+    );
+}
+
+#[tokio::test]
+async fn required_compaction_checkpoint_refuses_installed_audit_after_durable_rollout() {
+    let (mut session, _) = make_session_and_context().await;
+    let rollout_path = attach_thread_persistence(&mut session).await;
+    let metadata = test_compaction_metadata(&session).await;
+    let facts = Arc::new(std::sync::Mutex::new(Vec::new()));
+
+    let error = session
+        .replace_compacted_history_with_persistence(
+            vec![ResponseItemEnvelope::new(user_message("compacted history"))],
+            /*reference_context_item*/ None,
+            /*world_state_baseline*/ None,
+            metadata,
+            required_compaction_persistence(test_compaction_audit(
+                Arc::clone(&facts),
+                Some("compaction/installed"),
+            )),
+        )
+        .await
+        .expect_err("installed audit refusal must stop compaction");
+
+    assert!(error.to_string().contains("installed audit failed"));
+    assert_eq!(facts.lock().expect("audit facts lock").len(), 1);
+    let (items, _, _) = RolloutRecorder::load_rollout_items(&rollout_path)
+        .await
+        .expect("read durable rollout");
     assert!(
         items
             .iter()
