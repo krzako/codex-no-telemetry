@@ -35,6 +35,8 @@ mod compact_remote_history;
 mod compact_remote_v2;
 mod compact_token_budget;
 mod compaction_audit;
+mod dsh_compaction_checkpoint;
+pub use dsh_compaction_checkpoint::DshCompactionCheckpointStatus;
 mod thread_startup_metadata;
 pub use codex_network_proxy::EnvironmentNetworkPolicy;
 pub use codex_network_proxy::NetworkDomainPermission;

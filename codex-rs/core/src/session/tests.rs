@@ -4758,6 +4758,25 @@ async fn required_compaction_checkpoint_refuses_installed_audit_after_durable_ro
     );
 }
 
+#[tokio::test]
+async fn dsh_compaction_checkpoint_status_propagates_missing_and_failed_storage() {
+    let (mut session, _) = make_session_and_context().await;
+    let error = session
+        .dsh_compaction_checkpoint_status("compaction-1", &json!([]))
+        .await
+        .expect_err("missing storage cannot prove checkpoint state");
+    assert!(error.to_string().contains("persistence is disabled"));
+
+    let rollout_path = attach_thread_persistence(&mut session).await;
+    tokio::fs::write(&rollout_path, b"invalid rollout json\n")
+        .await
+        .expect("corrupt only the temporary test rollout");
+    session
+        .dsh_compaction_checkpoint_status("compaction-1", &json!([]))
+        .await
+        .expect_err("failed storage read cannot prove checkpoint state");
+}
+
 fn text_block(s: &str) -> serde_json::Value {
     json!({
         "type": "text",
