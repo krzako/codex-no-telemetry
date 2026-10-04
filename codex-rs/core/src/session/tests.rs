@@ -4660,10 +4660,21 @@ async fn required_compaction_checkpoint_is_durable_before_returning() {
     let (items, _, _) = RolloutRecorder::load_rollout_items(&rollout_path)
         .await
         .expect("read flushed rollout");
-    assert!(
-        items
-            .iter()
-            .any(|item| matches!(item, RolloutItem::Compacted(_)))
+    let checkpoint = items
+        .iter()
+        .find_map(|item| match item {
+            RolloutItem::Compacted(checkpoint) => Some(checkpoint),
+            _ => None,
+        })
+        .expect("persisted compaction checkpoint");
+    assert_eq!(
+        checkpoint
+            .replacement_history
+            .as_ref()
+            .and_then(|history| history.last())
+            .and_then(|item| item.metadata.as_ref())
+            .and_then(|metadata| metadata.dsh_compaction_id.as_deref()),
+        Some("compaction-1")
     );
     let installed_history = serde_json::to_value(session.clone_history().await.annotated_items())
         .expect("serialize installed history");
@@ -4672,6 +4683,10 @@ async fn required_compaction_checkpoint_is_durable_before_returning() {
     assert_eq!(facts[0]["kind"], "compaction/pending");
     assert_eq!(facts[1]["kind"], "compaction/installed");
     assert_eq!(facts[0]["effectiveHistory"], facts[1]["effectiveHistory"]);
+    assert_eq!(
+        facts[0]["effectiveHistory"]["value"][0]["metadata"]["dsh_compaction_id"],
+        "compaction-1"
+    );
     assert_eq!(facts[1]["effectiveHistory"]["value"], installed_history);
 }
 

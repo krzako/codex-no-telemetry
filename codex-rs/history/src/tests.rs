@@ -169,6 +169,7 @@ fn response_item_envelope_audit_json_round_trips_metadata_without_changing_rollo
         metadata: Some(CodexHarnessMetadata {
             client_authored: true,
             compaction_model_hash: Some("model-hash".to_string()),
+            dsh_compaction_id: Some("compaction-1".to_string()),
             ..Default::default()
         }),
     };

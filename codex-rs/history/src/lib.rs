@@ -71,6 +71,10 @@ pub struct CodexHarnessMetadata {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compaction_model_hash: Option<String>,
 
+    /// DSH's durable compaction identity, kept with the installed replacement history.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dsh_compaction_id: Option<String>,
+
     /// Thread acceptance order, independent of when queued user input reaches model history.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub user_input_order: Option<u64>,

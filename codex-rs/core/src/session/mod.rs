@@ -4017,6 +4017,12 @@ impl Session {
                 .get_or_insert_default()
                 .compaction_model_hash = metadata.compaction_model_hash;
         }
+        if let CompactionPersistence::Required { compaction_id, .. } = &persistence {
+            let last = items.last_mut().ok_or_else(|| {
+                CodexErr::Fatal("DSH compaction cannot install empty history".to_string())
+            })?;
+            last.metadata.get_or_insert_default().dsh_compaction_id = Some(compaction_id.clone());
+        }
         let mut compacted_item = CompactedItem {
             message: metadata.message,
             replacement_history: Some(items.clone()),
