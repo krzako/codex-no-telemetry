@@ -100,6 +100,7 @@ pub(crate) async fn record_pending(
     binding: Arc<DshAuditBinding>,
     compaction_id: &str,
     effective_history: &[ResponseItemEnvelope],
+    prior_rollout_sha256: &str,
 ) -> CodexResult<()> {
     binding
         .append(json!({
@@ -108,6 +109,7 @@ pub(crate) async fn record_pending(
             "kind": "compaction/pending",
             "compactionId": compaction_id,
             "effectiveHistory": { "kind": "inline", "value": effective_history },
+            "priorRolloutSha256": prior_rollout_sha256,
         }))
         .await
         .map_err(|error| CodexErr::Fatal(format!("DSH compaction pending audit failed: {error}")))

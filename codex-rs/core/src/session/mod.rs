@@ -4047,7 +4047,24 @@ impl Session {
             audit,
         } = &persistence
         {
-            compaction_audit::record_pending(Arc::clone(audit), compaction_id, &items).await?;
+            let live_thread = self
+                .live_thread_for_persistence("anchor DSH compaction")
+                .map_err(|error| CodexErr::Fatal(error.to_string()))?;
+            live_thread.flush().await.map_err(|error| {
+                CodexErr::Fatal(format!(
+                    "failed to flush prior DSH compaction rollout: {error}"
+                ))
+            })?;
+            let prior_rollout_sha256 = self.dsh_prior_rollout_sha256().await.map_err(|error| {
+                CodexErr::Fatal(format!("failed to anchor DSH compaction: {error}"))
+            })?;
+            compaction_audit::record_pending(
+                Arc::clone(audit),
+                compaction_id,
+                &items,
+                &prior_rollout_sha256,
+            )
+            .await?;
         }
         // Compaction starts a new history window, so its WorldState baseline must be full.
         let mut world_state_item = None;

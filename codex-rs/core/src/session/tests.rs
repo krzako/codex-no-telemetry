@@ -4607,14 +4607,25 @@ async fn required_compaction_checkpoint_refuses_missing_thread_before_history_re
 async fn required_compaction_checkpoint_propagates_append_failure() {
     let (mut session, _) = make_session_and_context().await;
     attach_thread_persistence(&mut session).await;
-    session
-        .live_thread()
-        .expect("attached live thread")
-        .discard()
-        .await
-        .expect("discard live thread to simulate failed append");
+    let live_thread = session.live_thread().expect("attached live thread").clone();
     let metadata = test_compaction_metadata(&session).await;
     let facts = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let recorded = Arc::clone(&facts);
+    let audit = Arc::new(crate::dsh_audit::DshAuditBinding::new(
+        "session-a".to_string(),
+        1,
+        move |fact| {
+            let live_thread = live_thread.clone();
+            let recorded = Arc::clone(&recorded);
+            Box::pin(async move {
+                if fact["kind"] == "compaction/pending" {
+                    live_thread.discard().await?;
+                }
+                recorded.lock().expect("audit facts lock").push(fact);
+                Ok(())
+            })
+        },
+    ));
 
     let error = session
         .replace_compacted_history_with_persistence(
@@ -4622,7 +4633,7 @@ async fn required_compaction_checkpoint_propagates_append_failure() {
             /*reference_context_item*/ None,
             /*world_state_baseline*/ None,
             metadata,
-            required_compaction_persistence(test_compaction_audit(Arc::clone(&facts), None)),
+            required_compaction_persistence(audit),
         )
         .await
         .expect_err("failed append must stop compaction");
@@ -4643,6 +4654,10 @@ async fn required_compaction_checkpoint_propagates_append_failure() {
 async fn required_compaction_checkpoint_is_durable_before_returning() {
     let (mut session, _) = make_session_and_context().await;
     let rollout_path = attach_thread_persistence(&mut session).await;
+    let prior_sha256 = session
+        .dsh_prior_rollout_sha256()
+        .await
+        .expect("read prior durable rollout digest");
     let metadata = test_compaction_metadata(&session).await;
     let facts = Arc::new(std::sync::Mutex::new(Vec::new()));
 
@@ -4681,6 +4696,7 @@ async fn required_compaction_checkpoint_is_durable_before_returning() {
     let facts = facts.lock().expect("audit facts lock");
     assert_eq!(facts.len(), 2);
     assert_eq!(facts[0]["kind"], "compaction/pending");
+    assert_eq!(facts[0]["priorRolloutSha256"], prior_sha256);
     assert_eq!(facts[1]["kind"], "compaction/installed");
     assert_eq!(facts[0]["effectiveHistory"], facts[1]["effectiveHistory"]);
     assert_eq!(
@@ -4761,6 +4777,10 @@ async fn required_compaction_checkpoint_refuses_installed_audit_after_durable_ro
 #[tokio::test]
 async fn dsh_compaction_checkpoint_status_propagates_missing_and_failed_storage() {
     let (mut session, _) = make_session_and_context().await;
+    session
+        .dsh_prior_rollout_sha256()
+        .await
+        .expect_err("missing storage cannot anchor prior rollout");
     let error = session
         .dsh_compaction_checkpoint_status("compaction-1", &json!([]))
         .await
@@ -4772,9 +4792,47 @@ async fn dsh_compaction_checkpoint_status_propagates_missing_and_failed_storage(
         .await
         .expect("corrupt only the temporary test rollout");
     session
+        .dsh_prior_rollout_sha256()
+        .await
+        .expect_err("failed storage read cannot anchor prior rollout");
+    session
         .dsh_compaction_checkpoint_status("compaction-1", &json!([]))
         .await
         .expect_err("failed storage read cannot prove checkpoint state");
+}
+
+#[tokio::test]
+async fn dsh_prior_rollout_anchor_survives_reload_and_detects_later_items() {
+    let (mut session, _) = make_session_and_context().await;
+    attach_thread_persistence(&mut session).await;
+    let before = session
+        .dsh_prior_rollout_sha256()
+        .await
+        .expect("fingerprint prior rollout");
+    assert_eq!(before.len(), 64);
+
+    let live_thread = session.live_thread().expect("attached live thread");
+    live_thread
+        .append_items(&[RolloutItem::ResponseItem(ResponseItemEnvelope::new(
+            user_message("later durable item"),
+        ))])
+        .await
+        .expect("append later rollout item");
+    live_thread.flush().await.expect("flush later rollout item");
+    let changed = session
+        .dsh_prior_rollout_sha256()
+        .await
+        .expect("fingerprint changed rollout");
+    assert_ne!(changed, before);
+
+    live_thread.discard().await.expect("close live writer");
+    assert_eq!(
+        session
+            .dsh_prior_rollout_sha256()
+            .await
+            .expect("reload durable rollout without live writer"),
+        changed
+    );
 }
 
 fn text_block(s: &str) -> serde_json::Value {

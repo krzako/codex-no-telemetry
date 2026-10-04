@@ -6,6 +6,8 @@ use codex_history::RolloutItem;
 use codex_thread_store::ThreadStoreError;
 use codex_thread_store::ThreadStoreResult;
 use serde_json::Value;
+use sha2::Digest;
+use sha2::Sha256;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DshCompactionCheckpointStatus {
@@ -18,6 +20,11 @@ pub enum DshCompactionCheckpointStatus {
 }
 
 impl CodexThread {
+    /// Fingerprint the prior durable rollout before permitting an automatic pending abort.
+    pub async fn dsh_prior_rollout_sha256(&self) -> ThreadStoreResult<String> {
+        self.session.dsh_prior_rollout_sha256().await
+    }
+
     /// Compare a pending audit fact with durable rollout data, never the mutable live history.
     pub async fn dsh_compaction_checkpoint_status(
         &self,
@@ -31,6 +38,20 @@ impl CodexThread {
 }
 
 impl Session {
+    pub(crate) async fn dsh_prior_rollout_sha256(&self) -> ThreadStoreResult<String> {
+        let live_thread = self
+            .live_thread_for_persistence("read prior DSH compaction rollout")
+            .map_err(|error| ThreadStoreError::Internal {
+                message: error.to_string(),
+            })?;
+        let stored = live_thread.load_history(/*include_archived*/ false).await?;
+        let bytes =
+            serde_json::to_vec(&stored.items).map_err(|error| ThreadStoreError::Internal {
+                message: format!("failed to serialize prior DSH compaction rollout: {error}"),
+            })?;
+        Ok(format!("{:x}", Sha256::digest(bytes)))
+    }
+
     pub(crate) async fn dsh_compaction_checkpoint_status(
         &self,
         compaction_id: &str,
