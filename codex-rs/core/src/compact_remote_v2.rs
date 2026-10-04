@@ -359,7 +359,8 @@ async fn run_remote_compact_task_inner_impl(
     } else {
         None
     };
-    sess.replace_compacted_history(
+    sess.replace_compacted_history_for_turn(
+        compaction_turn_context,
         new_history,
         reference_context_item,
         world_state_baseline,
@@ -372,7 +373,7 @@ async fn run_remote_compact_task_inner_impl(
             reviewer_compaction_hash,
         },
     )
-    .await;
+    .await?;
     sess.recompute_token_usage(compaction_turn_context).await;
 
     sess.emit_turn_item_completed(compaction_turn_context, compaction_item)

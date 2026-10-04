@@ -506,6 +506,12 @@ pub(crate) const SUBMISSION_CHANNEL_CAPACITY: usize = 512;
 const CYBER_VERIFY_URL: &str = "https://chatgpt.com/cyber";
 const CYBER_SAFETY_URL: &str = "https://developers.openai.com/codex/concepts/cyber-safety";
 
+#[derive(Clone, Copy)]
+enum CompactionPersistence {
+    BestEffort,
+    Required,
+}
+
 impl Session {
     /// Spawn and initialize a new session.
     /// Hide the concrete startup future from callers while keeping initialization lazy.
@@ -3933,11 +3939,61 @@ impl Session {
 
     pub(crate) async fn replace_compacted_history(
         &self,
-        mut items: Vec<ResponseItemEnvelope>,
+        items: Vec<ResponseItemEnvelope>,
         reference_context_item: Option<TurnContextItem>,
         world_state_baseline: Option<Arc<WorldState>>,
         metadata: CompactedHistoryMetadata,
     ) {
+        if let Err(error) = self
+            .replace_compacted_history_with_persistence(
+                items,
+                reference_context_item,
+                world_state_baseline,
+                metadata,
+                CompactionPersistence::BestEffort,
+            )
+            .await
+        {
+            error!("failed to record compaction checkpoint: {error:#}");
+        }
+    }
+
+    pub(crate) async fn replace_compacted_history_for_turn(
+        &self,
+        turn_context: &TurnContext,
+        items: Vec<ResponseItemEnvelope>,
+        reference_context_item: Option<TurnContextItem>,
+        world_state_baseline: Option<Arc<WorldState>>,
+        metadata: CompactedHistoryMetadata,
+    ) -> CodexResult<()> {
+        let persistence = if turn_context.dsh_audit_binding().is_some() {
+            CompactionPersistence::Required
+        } else {
+            CompactionPersistence::BestEffort
+        };
+        self.replace_compacted_history_with_persistence(
+            items,
+            reference_context_item,
+            world_state_baseline,
+            metadata,
+            persistence,
+        )
+        .await
+    }
+
+    async fn replace_compacted_history_with_persistence(
+        &self,
+        mut items: Vec<ResponseItemEnvelope>,
+        reference_context_item: Option<TurnContextItem>,
+        world_state_baseline: Option<Arc<WorldState>>,
+        metadata: CompactedHistoryMetadata,
+        persistence: CompactionPersistence,
+    ) -> CodexResult<()> {
+        if matches!(persistence, CompactionPersistence::Required) && self.live_thread().is_none() {
+            return Err(CodexErr::Fatal(
+                "DSH compaction requires durable thread persistence".to_string(),
+            ));
+        }
         for envelope in &mut items {
             Self::assign_missing_response_item_id(&mut envelope.item);
         }
@@ -4004,11 +4060,32 @@ impl Session {
         rollout_items.push(RolloutItem::EventMsg(
             thread_settings::applied_event(self).await,
         ));
-        self.persist_rollout_items(&rollout_items).await;
+        match persistence {
+            CompactionPersistence::BestEffort => self.persist_rollout_items(&rollout_items).await,
+            CompactionPersistence::Required => {
+                let live_thread = self
+                    .live_thread_for_persistence("record DSH compaction")
+                    .map_err(|error| CodexErr::Fatal(error.to_string()))?;
+                live_thread
+                    .append_items(&rollout_items)
+                    .await
+                    .map_err(|error| {
+                        CodexErr::Fatal(format!(
+                            "failed to record DSH compaction checkpoint: {error}"
+                        ))
+                    })?;
+                live_thread.flush().await.map_err(|error| {
+                    CodexErr::Fatal(format!(
+                        "failed to flush DSH compaction checkpoint: {error}"
+                    ))
+                })?;
+            }
+        }
         {
             let mut state = self.state.lock().await;
             state.queue_pending_session_start_source(codex_hooks::SessionStartSource::Compact);
         }
+        Ok(())
     }
 
     pub fn enabled(&self, feature: Feature) -> bool {

@@ -4535,6 +4535,100 @@ async fn attach_thread_persistence(session: &mut Session) -> PathBuf {
     rollout_path
 }
 
+async fn test_compaction_metadata(session: &Session) -> CompactedHistoryMetadata {
+    let (window_number, window_ids) = session.advance_auto_compact_window().await;
+    CompactedHistoryMetadata {
+        message: "summary".to_string(),
+        window_number,
+        window_ids,
+        compaction_response_id: None,
+        compaction_model_hash: None,
+        reviewer_compaction_hash: None,
+    }
+}
+
+#[tokio::test]
+async fn required_compaction_checkpoint_refuses_missing_thread_before_history_replacement() {
+    let (session, _) = make_session_and_context().await;
+    let before = session.clone_history().await.annotated_items().to_vec();
+    let metadata = test_compaction_metadata(&session).await;
+
+    let error = session
+        .replace_compacted_history_with_persistence(
+            vec![ResponseItemEnvelope::new(user_message("compacted history"))],
+            /*reference_context_item*/ None,
+            /*world_state_baseline*/ None,
+            metadata,
+            CompactionPersistence::Required,
+        )
+        .await
+        .expect_err("missing persistence must stop compaction");
+
+    assert!(
+        error
+            .to_string()
+            .contains("requires durable thread persistence")
+    );
+    assert_eq!(session.clone_history().await.annotated_items(), before);
+}
+
+#[tokio::test]
+async fn required_compaction_checkpoint_propagates_append_failure() {
+    let (mut session, _) = make_session_and_context().await;
+    attach_thread_persistence(&mut session).await;
+    session
+        .live_thread()
+        .expect("attached live thread")
+        .discard()
+        .await
+        .expect("discard live thread to simulate failed append");
+    let metadata = test_compaction_metadata(&session).await;
+
+    let error = session
+        .replace_compacted_history_with_persistence(
+            vec![ResponseItemEnvelope::new(user_message("compacted history"))],
+            /*reference_context_item*/ None,
+            /*world_state_baseline*/ None,
+            metadata,
+            CompactionPersistence::Required,
+        )
+        .await
+        .expect_err("failed append must stop compaction");
+
+    assert!(
+        error
+            .to_string()
+            .contains("failed to record DSH compaction checkpoint")
+    );
+}
+
+#[tokio::test]
+async fn required_compaction_checkpoint_is_durable_before_returning() {
+    let (mut session, _) = make_session_and_context().await;
+    let rollout_path = attach_thread_persistence(&mut session).await;
+    let metadata = test_compaction_metadata(&session).await;
+
+    session
+        .replace_compacted_history_with_persistence(
+            vec![ResponseItemEnvelope::new(user_message("compacted history"))],
+            /*reference_context_item*/ None,
+            /*world_state_baseline*/ None,
+            metadata,
+            CompactionPersistence::Required,
+        )
+        .await
+        .expect("durable checkpoint");
+
+    let (items, _, _) = RolloutRecorder::load_rollout_items(&rollout_path)
+        .await
+        .expect("read flushed rollout");
+    assert!(
+        items
+            .iter()
+            .any(|item| matches!(item, RolloutItem::Compacted(_)))
+    );
+}
+
 fn text_block(s: &str) -> serde_json::Value {
     json!({
         "type": "text",
