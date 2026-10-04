@@ -48,6 +48,10 @@ use codex_protocol::config_types::CollaborationMode;
 use codex_protocol::config_types::ModeKind;
 use codex_protocol::config_types::Settings;
 use codex_protocol::config_types::WindowsSandboxLevel;
+use codex_protocol::dynamic_tools::DynamicToolCallOutputContentItem;
+use codex_protocol::dynamic_tools::DynamicToolFunctionSpec;
+use codex_protocol::dynamic_tools::DynamicToolResponse;
+use codex_protocol::dynamic_tools::DynamicToolSpec;
 use codex_protocol::models::ActivePermissionProfile;
 use codex_protocol::models::FileSystemPermissions;
 use codex_protocol::models::PermissionProfile;
@@ -2935,25 +2939,7 @@ async fn deferred_executor_compaction_preserves_then_updates_environment_once() 
         vec![
             sse(vec![
                 ev_response_created("resp-1"),
-                ev_function_call(
-                    "wait-for-startup",
-                    "request_user_input",
-                    &json!({
-                        "questions": [{
-                            "id": "continue",
-                            "header": "Continue",
-                            "question": "Continue after startup?",
-                            "options": [{
-                                "label": "Yes (Recommended)",
-                                "description": "Continue the test."
-                            }, {
-                                "label": "No",
-                                "description": "Stop the test."
-                            }]
-                        }]
-                    })
-                    .to_string(),
-                ),
+                ev_function_call("wait-for-startup", "pause_for_environment", "{}"),
                 ev_completed_with_tokens("resp-1", /*total_tokens*/ 96),
             ]),
             sse(vec![
@@ -2973,18 +2959,25 @@ async fn deferred_executor_compaction_preserves_then_updates_environment_once() 
         .with_config(|config| {
             config.project_doc_max_bytes = 0;
             assert!(config.features.enable(Feature::DeferredExecutor).is_ok());
-            assert!(
-                config
-                    .features
-                    .enable(Feature::DefaultModeRequestUserInput)
-                    .is_ok()
-            );
             config.model_provider.name = "OpenAI (test)".to_string();
             config.compact_prompt = Some(SUMMARIZATION_PROMPT.to_string());
             config.model_context_window = Some(100);
             config.model_auto_compact_token_limit = Some(90);
         });
-    let test = expect_startup(builder.build(&server)).await;
+    let mut test = expect_startup(builder.build(&server)).await;
+    test.codex = test
+        .thread_manager
+        .start_thread(StartThreadOptions {
+            dynamic_tools: vec![DynamicToolSpec::Function(DynamicToolFunctionSpec {
+                name: "pause_for_environment".to_string(),
+                description: "Wait while the test environment becomes ready.".to_string(),
+                input_schema: json!({"type": "object", "properties": {}}),
+                defer_loading: false,
+            })],
+            ..StartThreadOptions::new(test.config.clone())
+        })
+        .await?
+        .thread;
 
     test.codex
         .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
@@ -2993,22 +2986,20 @@ async fn deferred_executor_compaction_preserves_then_updates_environment_once() 
         }]))
         .await?;
     let request = wait_for_event_match(&test.codex, |event| match event {
-        EventMsg::RequestUserInput(request) => Some(request.clone()),
+        EventMsg::DynamicToolCallRequest(request) => Some(request.clone()),
         _ => None,
     })
     .await;
 
     serve_environment_info(listener).await;
     test.codex
-        .submit(Op::UserInputAnswer {
-            id: request.turn_id,
-            response: RequestUserInputResponse {
-                answers: HashMap::from([(
-                    "continue".to_string(),
-                    RequestUserInputAnswer {
-                        answers: vec!["Yes (Recommended)".to_string()],
-                    },
-                )]),
+        .submit(Op::DynamicToolResponse {
+            id: request.call_id,
+            response: DynamicToolResponse {
+                content_items: vec![DynamicToolCallOutputContentItem::InputText {
+                    text: "environment ready".to_string(),
+                }],
+                success: true,
             },
         })
         .await?;
