@@ -4693,6 +4693,13 @@ async fn required_compaction_checkpoint_is_durable_before_returning() {
     );
     let installed_history = serde_json::to_value(session.clone_history().await.annotated_items())
         .expect("serialize installed history");
+    assert_eq!(
+        session
+            .dsh_compaction_checkpoint_status("compaction-1", &installed_history)
+            .await
+            .expect("compare durable checkpoint with installed history"),
+        crate::DshCompactionCheckpointStatus::Installed
+    );
     let facts = facts.lock().expect("audit facts lock");
     assert_eq!(facts.len(), 2);
     assert_eq!(facts[0]["kind"], "compaction/pending");
