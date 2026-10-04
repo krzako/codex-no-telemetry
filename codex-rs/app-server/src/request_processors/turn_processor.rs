@@ -676,7 +676,13 @@ impl TurnRequestProcessor {
                 ));
             }
             self.dsh_audit
-                .before_turn(&request_id, thread_id, &audit_turn, audit_config)
+                .before_turn(
+                    &request_id,
+                    thread_id,
+                    thread.as_ref(),
+                    &audit_turn,
+                    audit_config,
+                )
                 .await
                 .map_err(|err| internal_error(format!("DSH audit preflight failed: {err}")))?;
             let registry = thread

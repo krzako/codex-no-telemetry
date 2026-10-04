@@ -23,6 +23,8 @@ use codex_app_server_protocol::DshAuditCursorParams;
 use codex_app_server_protocol::DshAuditCursorResponse;
 use codex_app_server_protocol::DshAuditTurn;
 use codex_app_server_protocol::ServerRequestPayload;
+use codex_core::CodexThread;
+use codex_core::DshCompactionCheckpointStatus;
 use codex_protocol::ThreadId;
 use serde_json::Value;
 use serde_json::json;
@@ -36,6 +38,59 @@ use crate::outgoing_message::ConnectionRequestId;
 use crate::outgoing_message::OutgoingMessageSender;
 
 const DSH_AUDIT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+
+fn resolved_compaction_fact(
+    pending: &Value,
+    status: DshCompactionCheckpointStatus,
+    prior_rollout_sha256: Option<&str>,
+    created_this_process: bool,
+) -> Result<Value> {
+    let compaction_id = pending["compactionId"]
+        .as_str()
+        .ok_or_else(|| anyhow!("pending DSH compaction has no compactionId"))?;
+    let turn = pending["turn"]
+        .as_u64()
+        .ok_or_else(|| anyhow!("pending DSH compaction has no turn"))?;
+    let effective_history = pending["effectiveHistory"]
+        .as_object()
+        .ok_or_else(|| anyhow!("pending DSH compaction has no effective history"))?;
+    let history = Value::Object(effective_history.clone());
+    match status {
+        DshCompactionCheckpointStatus::Installed => Ok(json!({
+            "eventId": format!("dsh-compaction-installed-{compaction_id}"),
+            "turn": turn,
+            "kind": "compaction/installed",
+            "compactionId": compaction_id,
+            "effectiveHistory": history,
+        })),
+        DshCompactionCheckpointStatus::Absent => {
+            if created_this_process {
+                return Err(anyhow!(
+                    "DSH compaction {compaction_id} has no durable checkpoint; restart is required before deciding whether to abort"
+                ));
+            }
+            let anchor = pending["priorRolloutSha256"].as_str().ok_or_else(|| {
+                anyhow!("DSH compaction {compaction_id} has no prior rollout anchor")
+            })?;
+            if prior_rollout_sha256 != Some(anchor) {
+                return Err(anyhow!(
+                    "DSH compaction {compaction_id} rollout changed without a matching checkpoint"
+                ));
+            }
+            Ok(json!({
+                "eventId": format!("dsh-compaction-aborted-{compaction_id}"),
+                "turn": turn,
+                "kind": "compaction/aborted",
+                "compactionId": compaction_id,
+                "effectiveHistory": history,
+                "reason": "durable rollout matches its pre-compaction anchor; checkpoint absent",
+            }))
+        }
+        DshCompactionCheckpointStatus::Conflict => Err(anyhow!(
+            "DSH compaction {compaction_id} checkpoint conflicts with pending audit"
+        )),
+    }
+}
 
 struct AuditSpool {
     directory: PathBuf,
@@ -200,6 +255,7 @@ pub(crate) struct DshAuditManager {
     root: PathBuf,
     outgoing: Arc<OutgoingMessageSender>,
     locks: Mutex<HashMap<ThreadId, Arc<Semaphore>>>,
+    created_pending: Mutex<HashSet<(ThreadId, String)>>,
 }
 
 impl DshAuditManager {
@@ -208,6 +264,7 @@ impl DshAuditManager {
             root,
             outgoing,
             locks: Mutex::new(HashMap::new()),
+            created_pending: Mutex::new(HashSet::new()),
         }
     }
 
@@ -216,12 +273,14 @@ impl DshAuditManager {
         &self,
         request_id: &ConnectionRequestId,
         thread_id: ThreadId,
+        thread: &CodexThread,
         turn: &DshAuditTurn,
         config: Value,
     ) -> Result<()> {
-        self.append_fact(
+        self.append_fact_impl(
             request_id,
             thread_id,
+            Some(thread),
             json!({
                 "eventId": format!("dsh-turn-config-{}", turn.turn),
                 "turn": turn.turn,
@@ -240,6 +299,17 @@ impl DshAuditManager {
         thread_id: ThreadId,
         fact: Value,
     ) -> Result<()> {
+        self.append_fact_impl(request_id, thread_id, None, fact)
+            .await
+    }
+
+    async fn append_fact_impl(
+        &self,
+        request_id: &ConnectionRequestId,
+        thread_id: ThreadId,
+        recovery_thread: Option<&CodexThread>,
+        fact: Value,
+    ) -> Result<()> {
         let semaphore = {
             let mut locks = self.locks.lock().await;
             Arc::clone(
@@ -253,6 +323,15 @@ impl DshAuditManager {
         let thread_id_text = thread_id.to_string();
         let mut spool =
             tokio::task::spawn_blocking(move || AuditSpool::open(&root, &thread_id_text)).await??;
+        if fact["kind"] == "compaction/pending" {
+            let compaction_id = fact["compactionId"]
+                .as_str()
+                .ok_or_else(|| anyhow!("DSH compaction pending fact has no compactionId"))?;
+            self.created_pending
+                .lock()
+                .await
+                .insert((thread_id, compaction_id.to_string()));
+        }
         let connection = request_id.connection_id;
         let exchange = |payload| {
             let outgoing = Arc::clone(&self.outgoing);
@@ -277,6 +356,50 @@ impl DshAuditManager {
             }
         };
         spool.reconcile(exchange).await?;
+        if let Some(thread) = recovery_thread
+            && let Some(pending) = spool
+                .events
+                .last()
+                .filter(|event| event["kind"] == "compaction/pending")
+        {
+            let compaction_id = pending["compactionId"]
+                .as_str()
+                .ok_or_else(|| anyhow!("pending DSH compaction has no compactionId"))?;
+            let effective_history = pending["effectiveHistory"]["value"]
+                .as_array()
+                .ok_or_else(|| anyhow!("pending DSH compaction history is not inline JSON"))?;
+            let status = thread
+                .dsh_compaction_checkpoint_status(compaction_id, &json!(effective_history))
+                .await
+                .context("read durable DSH compaction checkpoint")?;
+            let prior_rollout_sha256 = if status == DshCompactionCheckpointStatus::Absent {
+                Some(
+                    thread
+                        .dsh_prior_rollout_sha256()
+                        .await
+                        .context("read prior DSH compaction rollout")?,
+                )
+            } else {
+                None
+            };
+            let created_this_process = self
+                .created_pending
+                .lock()
+                .await
+                .contains(&(thread_id, compaction_id.to_string()));
+            let resolution = resolved_compaction_fact(
+                pending,
+                status,
+                prior_rollout_sha256.as_deref(),
+                created_this_process,
+            )?;
+            spool = tokio::task::spawn_blocking(move || {
+                spool.record(resolution)?;
+                Ok::<_, anyhow::Error>(spool)
+            })
+            .await??;
+            spool.reconcile(exchange).await?;
+        }
         tokio::task::spawn_blocking(move || {
             spool.record(fact)?;
             Ok::<_, anyhow::Error>(spool)
@@ -291,6 +414,172 @@ impl DshAuditManager {
 mod tests {
     use super::*;
     use std::sync::Mutex as StdMutex;
+
+    fn pending_compaction() -> Value {
+        json!({
+            "eventId": "dsh-compaction-pending-compact-1",
+            "turn": 1,
+            "kind": "compaction/pending",
+            "compactionId": "compact-1",
+            "effectiveHistory": { "kind": "inline", "value": [{ "item": "summary" }] },
+            "priorRolloutSha256": "a".repeat(64),
+        })
+    }
+
+    #[test]
+    fn pending_compaction_resolution_requires_durable_evidence() -> Result<()> {
+        let pending = pending_compaction();
+        let installed = resolved_compaction_fact(
+            &pending,
+            DshCompactionCheckpointStatus::Installed,
+            None,
+            true,
+        )?;
+        assert_eq!(installed["kind"], "compaction/installed");
+        assert_eq!(installed["effectiveHistory"], pending["effectiveHistory"]);
+        let aborted = resolved_compaction_fact(
+            &pending,
+            DshCompactionCheckpointStatus::Absent,
+            Some(&"a".repeat(64)),
+            false,
+        )?;
+        assert_eq!(aborted["kind"], "compaction/aborted");
+        assert_eq!(aborted["effectiveHistory"], pending["effectiveHistory"]);
+        for (candidate, status, anchor, same_process) in [
+            (
+                &pending,
+                DshCompactionCheckpointStatus::Absent,
+                Some("different"),
+                false,
+            ),
+            (
+                &pending,
+                DshCompactionCheckpointStatus::Absent,
+                Some("a"),
+                true,
+            ),
+            (
+                &pending,
+                DshCompactionCheckpointStatus::Conflict,
+                None,
+                false,
+            ),
+        ] {
+            assert!(resolved_compaction_fact(candidate, status, anchor, same_process).is_err());
+        }
+        let mut legacy = pending.clone();
+        legacy
+            .as_object_mut()
+            .expect("pending object")
+            .remove("priorRolloutSha256");
+        assert!(
+            resolved_compaction_fact(
+                &legacy,
+                DshCompactionCheckpointStatus::Absent,
+                Some(&"a".repeat(64)),
+                false,
+            )
+            .is_err()
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn pending_recovery_replays_installation_before_next_turn_after_lost_acks() -> Result<()>
+    {
+        let root = tempfile::tempdir()?;
+        let thread_id = Uuid::now_v7().to_string();
+        let remote = Arc::new(StdMutex::new(Remote {
+            lose_first_ack: true,
+            ..Default::default()
+        }));
+        let pending = pending_compaction();
+        let mut spool = AuditSpool::open(root.path(), &thread_id)?;
+        spool.record(pending.clone())?;
+        assert!(
+            spool
+                .reconcile(exchange(Arc::clone(&remote)))
+                .await
+                .is_err()
+        );
+        drop(spool);
+
+        let mut resumed = AuditSpool::open(root.path(), &thread_id)?;
+        resumed.reconcile(exchange(Arc::clone(&remote))).await?;
+        resumed.record(resolved_compaction_fact(
+            &pending,
+            DshCompactionCheckpointStatus::Installed,
+            None,
+            false,
+        )?)?;
+        remote.lock().expect("remote lock").lose_first_ack = true;
+        assert!(
+            resumed
+                .reconcile(exchange(Arc::clone(&remote)))
+                .await
+                .is_err()
+        );
+        drop(resumed);
+
+        let mut reconnected = AuditSpool::open(root.path(), &thread_id)?;
+        reconnected.reconcile(exchange(Arc::clone(&remote))).await?;
+        reconnected.record_context(
+            &DshAuditTurn {
+                session_id: "session-1".into(),
+                turn: 2,
+            },
+            json!({"model": "next"}),
+        )?;
+        reconnected.reconcile(exchange(Arc::clone(&remote))).await?;
+        assert_eq!(
+            reconnected
+                .events
+                .iter()
+                .map(|event| event["kind"].as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                Some("compaction/pending"),
+                Some("compaction/installed"),
+                Some("context/config")
+            ]
+        );
+        let remote = remote.lock().expect("remote lock");
+        assert_eq!(remote.sequence, 3);
+        assert_eq!(remote.appends, 3);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn pending_recovery_aborts_unchanged_rollout_before_next_turn() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let thread_id = Uuid::now_v7().to_string();
+        let remote = Arc::new(StdMutex::new(Remote::default()));
+        let pending = pending_compaction();
+        let mut spool = AuditSpool::open(root.path(), &thread_id)?;
+        spool.record(pending.clone())?;
+        spool.reconcile(exchange(Arc::clone(&remote))).await?;
+        drop(spool);
+
+        let mut resumed = AuditSpool::open(root.path(), &thread_id)?;
+        resumed.record(resolved_compaction_fact(
+            &pending,
+            DshCompactionCheckpointStatus::Absent,
+            Some(&"a".repeat(64)),
+            false,
+        )?)?;
+        resumed.reconcile(exchange(Arc::clone(&remote))).await?;
+        resumed.record_context(
+            &DshAuditTurn {
+                session_id: "session-1".into(),
+                turn: 2,
+            },
+            json!({"model": "next"}),
+        )?;
+        resumed.reconcile(exchange(Arc::clone(&remote))).await?;
+        assert_eq!(resumed.events[1]["kind"], "compaction/aborted");
+        assert_eq!(remote.lock().expect("remote lock").sequence, 3);
+        Ok(())
+    }
 
     #[derive(Default)]
     struct Remote {
