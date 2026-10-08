@@ -149,6 +149,10 @@ pub struct ThreadStartParams {
     )]
     #[ts(optional = nullable)]
     pub dynamic_tools: Option<Vec<DynamicToolSpec>>,
+    /// Private DSH Codex V2 checkpoint used only when creating a fresh thread.
+    #[experimental("thread/start.dshContextSnapshot")]
+    #[ts(optional = nullable)]
+    pub dsh_context_snapshot: Option<JsonValue>,
     /// Capability roots selected for this thread by the hosting platform.
     #[experimental("thread/start.selectedCapabilityRoots")]
     #[ts(optional = nullable)]

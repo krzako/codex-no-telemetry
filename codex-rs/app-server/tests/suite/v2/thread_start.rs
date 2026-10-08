@@ -37,6 +37,7 @@ use codex_app_server_protocol::TurnStartParams;
 use codex_app_server_protocol::UserInput as V2UserInput;
 use codex_config::loader::project_trust_key;
 use codex_config::types::AuthCredentialsStoreMode;
+use codex_core::DshContextSource;
 use codex_core::config::set_project_trust_level;
 use codex_exec_server::LOCAL_FS;
 use codex_git_utils::resolve_root_git_project_for_trust;
@@ -49,6 +50,8 @@ use core_test_support::stdio_server_bin;
 use pretty_assertions::assert_eq;
 use serde_json::Value;
 use serde_json::json;
+use sha2::Digest;
+use sha2::Sha256;
 use std::path::Path;
 use std::path::PathBuf;
 use tempfile::TempDir;
@@ -69,6 +72,80 @@ use super::analytics::wait_for_analytics_payload;
 const DEFAULT_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 const INVALID_REQUEST_ERROR_CODE: i64 = -32600;
 const EXEC_POLICY_PARSE_WARNING_SUMMARY: &str = "Error parsing rules; custom rules not applied.";
+
+fn empty_dsh_checkpoint() -> Result<Value> {
+    let rollout_sha256 = format!("{:x}", Sha256::digest(serde_json::to_vec(&json!([]))?));
+    let snapshot = DshContextSource {
+        effective_history: Vec::new(),
+        retained_context: Default::default(),
+        history_version: 0,
+        rollout: Vec::new(),
+        rollout_sha256,
+    }
+    .into_portable_snapshot(json!({
+        "schemaVersion": 1,
+        "fork": { "revision": "test-fork" },
+    }))?;
+    Ok(serde_json::to_value(snapshot)?)
+}
+
+#[tokio::test]
+async fn thread_start_from_dsh_checkpoint_accepts_only_verified_fresh_import() -> Result<()> {
+    let codex_home = TempDir::new()?;
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .build_initialized()
+        .await?;
+    let checkpoint = empty_dsh_checkpoint()?;
+    let mut corrupt = checkpoint.clone();
+    corrupt["effectiveHistorySha256"] = json!("0".repeat(64));
+    let corrupt_request_id = mcp
+        .send_thread_start_request_with_auto_env(ThreadStartParams {
+            dsh_context_snapshot: Some(corrupt),
+            ..Default::default()
+        })
+        .await?;
+    let corrupt_error: JSONRPCError = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_error_message(RequestId::Integer(corrupt_request_id)),
+    )
+    .await??;
+    assert_eq!(corrupt_error.error.code, INVALID_REQUEST_ERROR_CODE);
+    assert!(
+        corrupt_error
+            .error
+            .message
+            .contains("effective history hash differs")
+    );
+
+    let clear_request_id = mcp
+        .send_thread_start_request_with_auto_env(ThreadStartParams {
+            dsh_context_snapshot: Some(checkpoint.clone()),
+            session_start_source: Some(codex_app_server_protocol::ThreadStartSource::Clear),
+            ..Default::default()
+        })
+        .await?;
+    let clear_error: JSONRPCError = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_error_message(RequestId::Integer(clear_request_id)),
+    )
+    .await??;
+    assert_eq!(clear_error.error.code, INVALID_REQUEST_ERROR_CODE);
+    assert!(
+        clear_error
+            .error
+            .message
+            .contains("sessionStartSource=clear")
+    );
+    let started = mcp
+        .start_thread(ThreadStartParams {
+            dsh_context_snapshot: Some(checkpoint),
+            ..Default::default()
+        })
+        .await?;
+    assert!(!started.thread.id.is_empty());
+    Ok(())
+}
 
 fn is_exec_policy_config_warning(notification: &JSONRPCNotification) -> bool {
     notification.method == "configWarning"

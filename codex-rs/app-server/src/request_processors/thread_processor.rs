@@ -22,6 +22,7 @@ use codex_app_server_protocol::ThreadSectionAppearance;
 use codex_app_server_protocol::ThreadSectionMoveParams;
 use codex_app_server_protocol::ThreadSectionMoveResponse;
 use codex_config::types::WindowsSandboxModeToml;
+use codex_core::DshContextSnapshotV2;
 use codex_extension_api::ExtensionDataInit;
 use codex_extension_api::ThreadIdleCause;
 use codex_protocol::SanitizedGitUrl;
@@ -1147,6 +1148,7 @@ impl ThreadRequestProcessor {
             base_instructions,
             developer_instructions,
             dynamic_tools,
+            dsh_context_snapshot,
             selected_capability_roots,
             mock_experimental_field: _mock_experimental_field,
             experimental_raw_events,
@@ -1160,6 +1162,17 @@ impl ThreadRequestProcessor {
             daybreak_enabled,
             environments,
         } = params;
+        if dsh_context_snapshot.is_some()
+            && session_start_source == Some(codex_app_server_protocol::ThreadStartSource::Clear)
+        {
+            return Err(invalid_request(
+                "dshContextSnapshot cannot be combined with sessionStartSource=clear",
+            ));
+        }
+        let dsh_import_snapshot = dsh_context_snapshot
+            .map(DshContextSnapshotV2::from_import_value)
+            .transpose()
+            .map_err(|error| invalid_request(format!("invalid DSH checkpoint: {error}")))?;
         if matches!(
             history_mode,
             Some(codex_app_server_protocol::ThreadHistoryMode::Paginated)
@@ -1239,6 +1252,7 @@ impl ThreadRequestProcessor {
                 config,
                 typesafe_overrides,
                 dynamic_tools,
+                dsh_import_snapshot,
                 selected_capability_roots.unwrap_or_default(),
                 history_mode.map(Into::into),
                 session_start_source,
@@ -1321,6 +1335,7 @@ impl ThreadRequestProcessor {
         config_overrides: Option<HashMap<String, serde_json::Value>>,
         typesafe_overrides: ConfigOverrides,
         dynamic_tools: Option<Vec<DynamicToolSpec>>,
+        dsh_import_snapshot: Option<DshContextSnapshotV2>,
         selected_capability_roots: Vec<SelectedCapabilityRoot>,
         history_mode: Option<ThreadHistoryMode>,
         session_start_source: Option<codex_app_server_protocol::ThreadStartSource>,
@@ -1496,6 +1511,7 @@ impl ThreadRequestProcessor {
                 history_mode,
                 thread_source,
                 dynamic_tools,
+                dsh_import_snapshot,
                 metrics_service_name: service_name,
                 parent_trace: request_trace,
                 environments: Some(environments),

@@ -2214,6 +2214,25 @@ fn client_request_thread_start_granular_approval_policy_is_marked_experimental()
 }
 
 #[test]
+fn client_request_thread_start_dsh_checkpoint_is_marked_experimental() {
+    let params = ThreadStartParams {
+        dsh_context_snapshot: Some(json!({ "version": 2 })),
+        ..Default::default()
+    };
+    let reason = crate::experimental_api::ExperimentalApi::experimental_reason(
+        &crate::ClientRequest::ThreadStart {
+            request_id: crate::RequestId::Integer(1),
+            params: params.clone(),
+        },
+    );
+    assert_eq!(reason, Some("thread/start.dshContextSnapshot"));
+    assert_eq!(
+        serde_json::to_value(params).expect("serialize params")["dshContextSnapshot"],
+        json!({ "version": 2 })
+    );
+}
+
+#[test]
 fn client_request_thread_resume_granular_approval_policy_is_marked_experimental() {
     let reason = crate::experimental_api::ExperimentalApi::experimental_reason(
         &crate::ClientRequest::ThreadResume {

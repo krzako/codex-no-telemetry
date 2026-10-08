@@ -1395,6 +1395,7 @@ async fn skills_changed_notification_is_emitted_after_skill_change() -> Result<(
             project_id: None,
             daybreak_enabled: None,
             dynamic_tools: None,
+            dsh_context_snapshot: None,
             environments: None,
             selected_capability_roots: None,
             mock_experimental_field: None,
