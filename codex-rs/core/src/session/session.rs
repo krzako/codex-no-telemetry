@@ -747,6 +747,7 @@ impl Session {
         tx_event: Sender<Event>,
         agent_status: watch::Sender<AgentStatus>,
         mut initial_history: InitialHistory,
+        dsh_import_snapshot: Option<crate::DshContextSnapshotV2>,
         fork_persistence: ForkPersistence,
         session_source: SessionSource,
         skills_service: Arc<HostSkillsService>,
@@ -1850,7 +1851,10 @@ impl Session {
             sess.start_mcp_prewarm_worker(mcp_prewarm_rx, mcp_auth_changes);
             sess.schedule_startup_prewarm(sess.get_prompt_base_instructions().await.text)
                 .await;
-            let session_start_source = match &initial_history {
+            let session_start_source = if dsh_import_snapshot.is_some() {
+                codex_hooks::SessionStartSource::Resume
+            } else {
+                match &initial_history {
                 InitialHistory::Forked(_) if forked_from_id.is_some() => {
                     codex_hooks::SessionStartSource::Fork
                 }
@@ -1861,10 +1865,20 @@ impl Session {
                 }
                 InitialHistory::New => codex_hooks::SessionStartSource::Startup,
                 InitialHistory::Cleared => codex_hooks::SessionStartSource::Clear,
+                }
             };
 
             // record_initial_history can emit events. We record only after the SessionConfiguredEvent is emitted.
             Box::pin(sess.record_initial_history(initial_history)).await;
+            if let Some(snapshot) = dsh_import_snapshot {
+                let has_prior_user_turns = snapshot
+                    .effective_history
+                    .iter()
+                    .any(|item| crate::context_manager::is_user_turn_boundary(&item.item));
+                let mut state = sess.state.lock().await;
+                state.history.install_dsh_snapshot(snapshot)?;
+                state.set_next_turn_is_first(!has_prior_user_turns);
+            }
             if restore_child_window {
                 sess.state.lock().await.restore_auto_compact_window(
                     /*window_number*/ 0,

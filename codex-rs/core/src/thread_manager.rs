@@ -2,6 +2,7 @@ mod managed;
 mod shared_instructions;
 
 use crate::CodexAppsToolsCache;
+use crate::DshContextSnapshotV2;
 use crate::agent::LocalAgentControl;
 use crate::agents_md_manager::SessionInstructions;
 use crate::attestation::AttestationProvider;
@@ -95,6 +96,7 @@ use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_git_discovery::GitRootDiscovery;
 use futures::StreamExt;
 use futures::stream::FuturesUnordered;
+use serde_json::Value;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -263,6 +265,8 @@ pub struct StartThreadOptions {
     pub thread_instructions_provider: Option<Arc<dyn ThreadInstructionsProvider>>,
     pub allow_provider_model_fallback: bool,
     pub initial_history: InitialHistory,
+    /// Prevalidated DSH import seed for a new thread; never reconstructed from local rollout.
+    pub dsh_import_snapshot: Option<DshContextSnapshotV2>,
     /// Parent captured for `start_thread`, including a parent not in the live registry.
     pub internal_parent: Option<InternalSessionParent>,
     pub history_mode: Option<ThreadHistoryMode>,
@@ -291,6 +295,7 @@ impl StartThreadOptions {
             thread_instructions_provider: None,
             allow_provider_model_fallback: false,
             initial_history: InitialHistory::New,
+            dsh_import_snapshot: None,
             internal_parent: None,
             history_mode: None,
             session_source: None,
@@ -1019,10 +1024,38 @@ impl ThreadManager {
     }
 
     pub async fn start_thread(&self, options: StartThreadOptions) -> CodexResult<NewThread> {
+        if options.dsh_import_snapshot.is_some()
+            && (!matches!(options.initial_history, InitialHistory::New)
+                || options.internal_parent.is_some())
+        {
+            return Err(CodexErr::InvalidRequest(
+                "DSH checkpoint import requires a fresh root thread".to_string(),
+            ));
+        }
         Box::pin(self.start_thread_inner(
             options, /*forked_from_thread_id*/ None, /*startup*/ None,
         ))
         .await
+    }
+
+    /// Create a new thread from an archive checkpoint, independently of the source CODEX_HOME.
+    pub async fn start_thread_from_dsh_snapshot(
+        &self,
+        mut options: StartThreadOptions,
+        checkpoint: Value,
+    ) -> CodexResult<NewThread> {
+        if !matches!(options.initial_history, InitialHistory::New)
+            || options.internal_parent.is_some()
+        {
+            return Err(CodexErr::InvalidRequest(
+                "DSH checkpoint import requires a fresh root thread".to_string(),
+            ));
+        }
+        let snapshot = DshContextSnapshotV2::from_import_value(checkpoint).map_err(|error| {
+            CodexErr::InvalidRequest(format!("invalid DSH checkpoint: {error}"))
+        })?;
+        options.dsh_import_snapshot = Some(snapshot);
+        self.start_thread(options).await
     }
 
     /// Starts a fresh internal session associated with an existing parent thread.
@@ -2011,6 +2044,7 @@ impl ThreadManagerState {
             thread_instructions_provider,
             allow_provider_model_fallback,
             initial_history,
+            dsh_import_snapshot,
             internal_parent: _,
             history_mode,
             session_source,
@@ -2188,6 +2222,7 @@ impl ThreadManagerState {
             code_mode_session_provider: Arc::clone(&self.code_mode_session_provider),
             extensions,
             conversation_history: initial_history,
+            dsh_import_snapshot,
             disabled_plugin_ids,
             requested_history_mode: history_mode,
             fork_persistence,

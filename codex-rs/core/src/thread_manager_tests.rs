@@ -16,7 +16,9 @@ use crate::tasks::interrupted_turn_history_marker;
 use crate::windows_sandbox::WindowsSandboxLevelExt;
 use codex_extension_api::empty_extension_registry;
 use codex_history::InitialHistory;
+use codex_history::ResponseItemEnvelope;
 use codex_history::ResumedHistory;
+use codex_history::RetainedContext;
 use codex_models_manager::manager::RefreshStrategy;
 use codex_protocol::ResponseItemId;
 use codex_protocol::capabilities::CapabilityRootLocation;
@@ -49,11 +51,115 @@ use core_test_support::PathExt;
 use core_test_support::responses::mount_models_once;
 use core_test_support::responses::strip_response_item_ids_from_json;
 use pretty_assertions::assert_eq;
+use sha2::Digest;
+use sha2::Sha256;
 use std::time::Duration;
 use tempfile::tempdir;
 use wiremock::MockServer;
 
 const TEST_INSTALLATION_ID: &str = "11111111-1111-4111-8111-111111111111";
+
+fn dsh_checkpoint_for_import() -> (serde_json::Value, Vec<ResponseItemEnvelope>) {
+    let effective_history = vec![ResponseItemEnvelope::new(ResponseItem::Message {
+        id: None,
+        role: "user".to_string(),
+        content: vec![ContentItem::InputText {
+            text: "Continue the imported conversation".to_string(),
+        }],
+        phase: None,
+        internal_chat_message_metadata_passthrough: None,
+    })];
+    let rollout = vec![RolloutItem::ResponseItem(effective_history[0].clone())];
+    let rollout_sha256 = format!(
+        "{:x}",
+        Sha256::digest(serde_json::to_vec(&rollout).expect("rollout"))
+    );
+    let snapshot = crate::DshContextSource {
+        effective_history: effective_history.clone(),
+        retained_context: RetainedContext::default(),
+        history_version: 3,
+        rollout,
+        rollout_sha256,
+    }
+    .into_portable_snapshot(serde_json::json!({
+        "schemaVersion": 1,
+        "fork": { "revision": "source-fork" },
+    }))
+    .expect("portable snapshot");
+    (
+        serde_json::to_value(snapshot).expect("checkpoint JSON"),
+        effective_history,
+    )
+}
+
+#[tokio::test]
+async fn starts_new_thread_from_dsh_checkpoint_without_source_codex_home() {
+    let temp_dir = tempdir().expect("tempdir");
+    let mut config = test_config().await;
+    config.codex_home = temp_dir.path().join("new-codex-home").abs();
+    config.cwd = config.codex_home.abs();
+    std::fs::create_dir_all(&config.codex_home).expect("create new Codex home");
+    let manager = ThreadManager::with_models_provider_and_home_for_tests(
+        CodexAuth::from_api_key("dummy"),
+        config.model_provider.clone(),
+        config.codex_home.to_path_buf(),
+        Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
+    );
+    let (checkpoint, expected_history) = dsh_checkpoint_for_import();
+    let thread = manager
+        .start_thread_from_dsh_snapshot(
+            StartThreadOptions {
+                environments: Some(Vec::new()),
+                ..StartThreadOptions::new(config)
+            },
+            checkpoint,
+        )
+        .await
+        .expect("imported thread");
+    let history = thread.thread.session.clone_history().await;
+    assert_eq!(history.annotated_items(), expected_history);
+    assert_eq!(history.history_version(), 3);
+    assert_eq!(manager.list_thread_ids().await, vec![thread.thread_id]);
+}
+
+#[tokio::test]
+async fn invalid_dsh_checkpoint_is_rejected_before_thread_registration() {
+    let temp_dir = tempdir().expect("tempdir");
+    let mut config = test_config().await;
+    config.codex_home = temp_dir.path().join("new-codex-home").abs();
+    config.cwd = config.codex_home.abs();
+    std::fs::create_dir_all(&config.codex_home).expect("create new Codex home");
+    let manager = ThreadManager::with_models_provider_and_home_for_tests(
+        CodexAuth::from_api_key("dummy"),
+        config.model_provider.clone(),
+        config.codex_home.to_path_buf(),
+        Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
+    );
+    let (mut checkpoint, _) = dsh_checkpoint_for_import();
+    checkpoint["effectiveHistorySha256"] = serde_json::json!("0".repeat(64));
+    assert!(
+        manager
+            .start_thread_from_dsh_snapshot(StartThreadOptions::new(config.clone()), checkpoint)
+            .await
+            .is_err()
+    );
+    let (checkpoint, _) = dsh_checkpoint_for_import();
+    let mut resumed = StartThreadOptions::new(config);
+    resumed.initial_history = InitialHistory::Forked(Vec::new());
+    assert!(
+        manager
+            .start_thread_from_dsh_snapshot(resumed, checkpoint)
+            .await
+            .is_err()
+    );
+    let (checkpoint, _) = dsh_checkpoint_for_import();
+    let mut direct = StartThreadOptions::new(test_config().await);
+    direct.initial_history = InitialHistory::Forked(Vec::new());
+    direct.dsh_import_snapshot =
+        Some(DshContextSnapshotV2::from_import_value(checkpoint).expect("valid checkpoint"));
+    assert!(manager.start_thread(direct).await.is_err());
+    assert!(manager.list_thread_ids().await.is_empty());
+}
 
 struct ParentInstructionsProvider(codex_extension_api::Instructions);
 
