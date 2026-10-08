@@ -142,3 +142,73 @@ fn canonical_json_hash_covers_float_bits_and_utf8_key_order() {
         "b4b42ba5e7880e91469e8b01bdabf4a33bb05ed83b6583078e07af8e4cde2a9f"
     );
 }
+
+#[test]
+fn imported_snapshot_round_trips_without_losing_fields() {
+    let snapshot = source(vec![compaction(Some("first")), compaction(Some("second"))])
+        .into_portable_snapshot(config())
+        .expect("portable snapshot");
+    let value = serde_json::to_value(&snapshot).expect("serialize snapshot");
+    let imported = DshContextSnapshotV2::from_import_value(value.clone()).expect("valid import");
+    assert_eq!(
+        serde_json::to_value(imported).expect("serialize import"),
+        value
+    );
+}
+
+#[test]
+fn imported_snapshot_rejects_corrupt_history_and_rollout_hashes() {
+    let snapshot = source(vec![compaction(Some("first"))])
+        .into_portable_snapshot(config())
+        .expect("portable snapshot");
+    let valid = serde_json::to_value(snapshot).expect("serialize snapshot");
+    let mut history = valid.clone();
+    history["effectiveHistorySha256"] = json!("0".repeat(64));
+    assert!(DshContextSnapshotV2::from_import_value(history).is_err());
+
+    let mut rollout = valid;
+    rollout["rolloutSha256"] = json!("0".repeat(64));
+    assert!(DshContextSnapshotV2::from_import_value(rollout).is_err());
+}
+
+#[test]
+fn imported_snapshot_rejects_compaction_drift_even_with_valid_rollout_hash() {
+    let snapshot = source(vec![compaction(Some("first")), compaction(Some("second"))])
+        .into_portable_snapshot(config())
+        .expect("portable snapshot");
+    let valid = serde_json::to_value(snapshot).expect("serialize snapshot");
+
+    let mut duplicate = valid.clone();
+    duplicate["compactions"][1]["id"] = json!("first");
+    assert!(DshContextSnapshotV2::from_import_value(duplicate).is_err());
+
+    let mut changed_summary = valid.clone();
+    changed_summary["compactions"][0]["summary"] = json!("different");
+    assert!(DshContextSnapshotV2::from_import_value(changed_summary).is_err());
+
+    let mut changed_rollout = valid;
+    changed_rollout["rollout"][0]["payload"]["message"] = json!("different");
+    changed_rollout["rolloutSha256"] =
+        json!(dsh_json_sha256(&changed_rollout["rollout"]).expect("changed rollout hash"));
+    assert!(DshContextSnapshotV2::from_import_value(changed_rollout).is_err());
+}
+
+#[test]
+fn imported_snapshot_rejects_unsupported_or_unpreserved_data() {
+    let snapshot = source(vec![compaction(Some("first"))])
+        .into_portable_snapshot(config())
+        .expect("portable snapshot");
+    let valid = serde_json::to_value(snapshot).expect("serialize snapshot");
+
+    let mut version = valid.clone();
+    version["version"] = json!(3);
+    assert!(DshContextSnapshotV2::from_import_value(version).is_err());
+
+    let mut revision = valid.clone();
+    revision["runtimeRevision"] = json!("another-fork");
+    assert!(DshContextSnapshotV2::from_import_value(revision).is_err());
+
+    let mut unknown = valid;
+    unknown["retainedContext"]["futureFact"] = json!("must not be dropped");
+    assert!(DshContextSnapshotV2::from_import_value(unknown).is_err());
+}

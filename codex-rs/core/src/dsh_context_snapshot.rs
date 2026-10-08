@@ -7,6 +7,7 @@ use anyhow::ensure;
 use codex_history::ResponseItemEnvelope;
 use codex_history::RetainedContext;
 use codex_history::RolloutItem;
+use serde::Deserialize;
 use serde::Serialize;
 use serde_json::Value;
 use sha2::Digest;
@@ -14,8 +15,9 @@ use sha2::Sha256;
 use std::collections::HashSet;
 
 /// A compaction installed in the durable rollout, including its model-visible result.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields)]
 pub struct DshCompactionStateV2 {
     pub id: String,
     pub summary: String,
@@ -26,8 +28,9 @@ pub struct DshCompactionStateV2 {
 
 /// Exact Codex-owned state and its provenance; host paths in the rollout are explanatory only.
 /// Import must restore `effective_history`, never replay `rollout` side effects.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields)]
 pub struct DshContextSnapshotV2 {
     pub version: u8,
     pub hash_algorithm: String,
@@ -40,6 +43,106 @@ pub struct DshContextSnapshotV2 {
     pub rollout: Vec<RolloutItem>,
     pub rollout_sha256: String,
     pub context_config: Value,
+}
+
+impl DshContextSnapshotV2 {
+    /// Decode untrusted archive JSON without silently discarding any checkpoint fields.
+    pub fn from_import_value(value: Value) -> Result<Self> {
+        let snapshot: Self = serde_json::from_value(value.clone())?;
+        ensure!(
+            serde_json::to_value(&snapshot)? == value,
+            "DSH Codex checkpoint contains fields that this fork cannot preserve"
+        );
+        snapshot.validate_for_import()?;
+        Ok(snapshot)
+    }
+
+    /// Check the private checkpoint's integrity before any thread is created.
+    pub fn validate_for_import(&self) -> Result<()> {
+        ensure!(
+            self.version == 2,
+            "unsupported DSH Codex checkpoint version"
+        );
+        ensure!(
+            self.hash_algorithm == "dsh-json-v1",
+            "unsupported DSH Codex checkpoint hash algorithm"
+        );
+        ensure!(
+            !self.runtime_revision.is_empty(),
+            "DSH Codex checkpoint has no runtime revision"
+        );
+        ensure!(
+            self.history_version <= 9_007_199_254_740_991,
+            "DSH Codex checkpoint history version exceeds JSON safe integer range"
+        );
+        ensure!(
+            self.context_config["schemaVersion"] == 1,
+            "unsupported DSH Codex checkpoint context configuration"
+        );
+        let configured_revision = self
+            .context_config
+            .pointer("/fork/revision")
+            .and_then(Value::as_str)
+            .filter(|revision| !revision.is_empty())
+            .or_else(|| {
+                self.context_config
+                    .pointer("/fork/packageVersion")
+                    .and_then(Value::as_str)
+                    .filter(|revision| !revision.is_empty())
+            });
+        ensure!(
+            configured_revision == Some(self.runtime_revision.as_str()),
+            "DSH Codex checkpoint runtime revision differs from its context configuration"
+        );
+        ensure!(
+            self.effective_history_sha256
+                == dsh_json_sha256(&serde_json::to_value(&self.effective_history)?)?,
+            "DSH Codex checkpoint effective history hash differs"
+        );
+        ensure!(
+            self.rollout_sha256 == dsh_json_sha256(&serde_json::to_value(&self.rollout)?)?,
+            "DSH Codex checkpoint rollout hash differs"
+        );
+
+        let mut ids = HashSet::new();
+        let mut installed = self.compactions.iter();
+        for rollout_item in &self.rollout {
+            let RolloutItem::Compacted(checkpoint) = rollout_item else {
+                continue;
+            };
+            let compaction = installed
+                .next()
+                .ok_or_else(|| anyhow!("DSH Codex checkpoint has an unlisted compaction"))?;
+            ensure!(
+                !compaction.id.is_empty() && ids.insert(compaction.id.as_str()),
+                "DSH Codex checkpoint has a duplicate or empty compaction identity"
+            );
+            let replacement_history = checkpoint.replacement_history.as_ref().ok_or_else(|| {
+                anyhow!("DSH Codex rollout compaction has no replacement history")
+            })?;
+            ensure!(
+                compaction
+                    .replacement_history
+                    .last()
+                    .and_then(|item| item.metadata.as_ref())
+                    .and_then(|metadata| metadata.dsh_compaction_id.as_deref())
+                    == Some(compaction.id.as_str()),
+                "DSH Codex checkpoint compaction has no matching durable identity"
+            );
+            ensure!(
+                &compaction.replacement_history == replacement_history
+                    && compaction.summary == checkpoint.message
+                    && compaction.response_id == checkpoint.compaction_response_id
+                    && compaction.window_id == checkpoint.window_id,
+                "DSH Codex checkpoint compaction chain differs from rollout"
+            );
+        }
+        ensure!(
+            installed.next().is_none(),
+            "DSH Codex checkpoint contains a compaction absent from rollout"
+        );
+        Ok(())
+    }
 }
 
 impl DshContextSource {
