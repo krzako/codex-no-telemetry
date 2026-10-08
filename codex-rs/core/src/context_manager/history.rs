@@ -6,6 +6,8 @@
 //! Oversized instructions keep an incomplete excerpt for bounded root review, including
 //! sources recovered from legacy Guardian checkpoints before their raw history is dropped.
 
+#[path = "history_dsh_import.rs"]
+mod dsh_import;
 #[path = "history_user_authorization.rs"]
 mod user_authorization;
 

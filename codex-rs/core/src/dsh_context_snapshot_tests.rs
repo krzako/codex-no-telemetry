@@ -1,4 +1,5 @@
 use super::*;
+use crate::context_manager::ContextManager;
 use codex_history::CodexHarnessMetadata;
 use codex_history::CompactedItem;
 use codex_protocol::ResponseItemId;
@@ -211,4 +212,58 @@ fn imported_snapshot_rejects_unsupported_or_unpreserved_data() {
     let mut unknown = valid;
     unknown["retainedContext"]["futureFact"] = json!("must not be dropped");
     assert!(DshContextSnapshotV2::from_import_value(unknown).is_err());
+}
+
+#[test]
+fn installs_only_verified_active_history_into_a_fresh_context() {
+    let mut captured = source(vec![compaction(Some("first"))]);
+    captured.retained_context = serde_json::from_value(json!({
+        "verified_answers": [],
+        "incomplete": false,
+        "user_messages": [],
+        "user_messages_incomplete": false,
+        "next_order": 7,
+    }))
+    .expect("retained facts");
+    let expected_history = captured.effective_history.clone();
+    let expected_retained = captured.retained_context.clone();
+    let expected_version = captured.history_version;
+    let exported = captured
+        .into_portable_snapshot(config())
+        .expect("portable snapshot");
+    let imported = DshContextSnapshotV2::from_import_value(
+        serde_json::to_value(exported).expect("serialize snapshot"),
+    )
+    .expect("verified import");
+
+    let mut history = ContextManager::new();
+    history
+        .install_dsh_snapshot(imported)
+        .expect("install checkpoint");
+    assert_eq!(history.annotated_items(), expected_history);
+    assert_eq!(history.retained_context(), &expected_retained);
+    assert_eq!(history.history_version(), expected_version);
+    assert_eq!(history.reset_version, expected_version);
+    assert_eq!(history.reference_context_item(), None);
+}
+
+#[test]
+fn refuses_invalid_or_nonfresh_install_without_changing_context() {
+    let valid = source(vec![])
+        .into_portable_snapshot(config())
+        .expect("portable snapshot");
+    let mut history = ContextManager::new();
+    history.replace_annotated(vec![message()]);
+    let before = history.annotated_items().to_vec();
+    assert!(history.install_dsh_snapshot(valid).is_err());
+    assert_eq!(history.annotated_items(), before);
+
+    let mut corrupt = source(vec![])
+        .into_portable_snapshot(config())
+        .expect("portable snapshot");
+    corrupt.effective_history_sha256 = "0".repeat(64);
+    let mut fresh = ContextManager::new();
+    assert!(fresh.install_dsh_snapshot(corrupt).is_err());
+    assert!(fresh.annotated_items().is_empty());
+    assert_eq!(fresh.history_version(), 0);
 }
