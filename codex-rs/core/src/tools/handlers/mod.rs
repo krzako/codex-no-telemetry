@@ -1,5 +1,3 @@
-pub(crate) mod apply_patch;
-pub(crate) mod apply_patch_spec;
 mod dynamic;
 pub(crate) mod multi_agents;
 pub(crate) mod multi_agents_common;
@@ -25,7 +23,6 @@ use crate::function_tool::FunctionCallError;
 use crate::sandboxing::SandboxPermissions;
 use crate::session::session::Session;
 use crate::session::turn_context::TurnEnvironment;
-pub use apply_patch::ApplyPatchHandler;
 use codex_protocol::models::AdditionalPermissionProfile;
 use codex_protocol::protocol::AskForApproval;
 pub use dynamic::DynamicToolHandler;

@@ -33,6 +33,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 pub(crate) mod apply_patch;
+pub(crate) mod shell_apply_patch;
 pub(crate) mod unified_exec;
 pub(crate) mod zsh_fork;
 
