@@ -1001,7 +1001,6 @@ fn test_tool_runtime(session: Arc<Session>, turn_context: Arc<TurnContext>) -> T
         step_context.turn.as_ref(),
         step_context.turn.model_info(),
         registry,
-        Vec::new(),
     ));
     let step_context = step_context.with_tool_router_for_test(router);
     let tracker = Arc::new(tokio::sync::Mutex::new(TurnDiffTracker::new()));
@@ -12288,7 +12287,6 @@ async fn fatal_tool_error_stops_turn_and_reports_error() {
         step_context.turn.as_ref(),
         step_context.turn.model_info(),
         registry,
-        Vec::new(),
     );
     let item = ResponseItem::CustomToolCall {
         id: None,

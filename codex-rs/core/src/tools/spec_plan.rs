@@ -36,7 +36,7 @@ pub(crate) fn build_tool_router(
 ) -> CodexResult<ToolRouter> {
     let mut registry = ToolRegistry::with_allowed_tools(session.allowed_tools.clone());
     append_dynamic_tool_runtimes(&turn_context.dynamic_tools, &mut registry);
-    finalize_tool_router(turn_context, model_info, registry, Vec::new())
+    finalize_tool_router(turn_context, model_info, registry)
 }
 
 #[instrument(level = "trace", skip_all)]
@@ -44,11 +44,7 @@ pub(crate) fn finalize_tool_router(
     turn_context: &TurnContext,
     model_info: &ModelInfo,
     registry: ToolRegistry,
-    mut hosted_specs: Vec<ToolSpec>,
 ) -> CodexResult<ToolRouter> {
-    if let Some(allowed) = &registry.allowed_tools {
-        hosted_specs.retain(|spec| allowed.contains(&ToolName::plain(spec.name())));
-    }
     let tool_mode = effective_tool_mode(turn_context, model_info);
     let code_mode_tool_names = BTreeMap::new();
     let include_tool_namespaces_info = turn_context
@@ -113,7 +109,7 @@ pub(crate) fn finalize_tool_router(
         }
     }
 
-    let model_visible_specs = build_model_visible_specs(turn_context, &registry, hosted_specs);
+    let model_visible_specs = build_model_visible_specs(turn_context, &registry);
     let tool_namespaces_info = include_tool_namespaces_info
         .then(|| {
             collect_tool_namespaces_info(&registry, &code_mode_tool_names, &model_visible_specs)
@@ -132,11 +128,7 @@ pub(crate) fn finalize_tool_router(
 }
 
 #[instrument(level = "trace", skip_all)]
-fn build_model_visible_specs(
-    turn_context: &TurnContext,
-    registry: &ToolRegistry,
-    hosted_specs: Vec<ToolSpec>,
-) -> Vec<ToolSpec> {
+fn build_model_visible_specs(turn_context: &TurnContext, registry: &ToolRegistry) -> Vec<ToolSpec> {
     let mut specs = Vec::new();
     for tool in registry.entries() {
         let exposure = tool.exposure;
@@ -146,8 +138,6 @@ fn build_model_visible_specs(
 
         specs.push(tool.runtime.spec());
     }
-    specs.extend(hosted_specs);
-
     merge_into_namespaces(specs)
         .into_iter()
         .filter(|spec| {

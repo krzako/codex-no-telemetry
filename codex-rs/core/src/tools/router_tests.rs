@@ -45,7 +45,6 @@ fn test_tool_router(step_context: &StepContext, dynamic_tools: &[DynamicToolSpec
         step_context.turn.as_ref(),
         step_context.turn.model_info(),
         registry,
-        Vec::new(),
     )
 }
 

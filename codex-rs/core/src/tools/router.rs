@@ -96,9 +96,8 @@ impl ToolRouter {
         turn_context: &TurnContext,
         model_info: &ModelInfo,
         registry: ToolRegistry,
-        hosted_specs: Vec<ToolSpec>,
     ) -> Self {
-        finalize_tool_router(turn_context, model_info, registry, hosted_specs)
+        finalize_tool_router(turn_context, model_info, registry)
             .expect("test tool registry should not contain duplicate tools")
     }
 
