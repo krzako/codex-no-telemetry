@@ -5,7 +5,7 @@ pub(crate) mod multi_agents_spec;
 pub(crate) mod multi_agents_v2;
 pub(crate) mod shell_spec;
 pub(crate) mod unified_exec;
-mod wait_for_environment;
+mod wait_for_environment_config;
 
 use codex_file_system::FileSystemSandboxContext;
 use codex_sandboxing::policy_transforms::materialize_additional_permissions_with_context;
@@ -29,8 +29,7 @@ pub use dynamic::DynamicToolHandler;
 pub use unified_exec::ExecCommandHandler;
 pub(crate) use unified_exec::ExecCommandHandlerOptions;
 pub use unified_exec::WriteStdinHandler;
-pub(crate) use wait_for_environment::WaitForEnvironmentHandler;
-pub use wait_for_environment::WaitForEnvironmentToolConfig;
+pub use wait_for_environment_config::WaitForEnvironmentToolConfig;
 
 pub(crate) fn parse_arguments<T>(arguments: &str) -> Result<T, FunctionCallError>
 where
