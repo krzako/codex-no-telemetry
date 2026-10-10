@@ -176,7 +176,8 @@ impl PendingAppServerRequests {
             }
             ServerRequest::DynamicToolCall { .. } => None,
             ServerRequest::DshAuditAppend { request_id, .. }
-            | ServerRequest::DshAuditCursor { request_id, .. } => {
+            | ServerRequest::DshAuditCursor { request_id, .. }
+            | ServerRequest::DshAuditArtifact { request_id, .. } => {
                 Some(UnsupportedAppServerRequest {
                     request_id: request_id.clone(),
                     message: "DSH audit requests are not available in TUI.".to_string(),
@@ -438,6 +439,7 @@ impl PendingAppServerRequests {
                 .any(|pending_request_id| pending_request_id == request_id),
             ServerRequest::ChatgptAuthTokensRefresh { .. } => true,
             ServerRequest::DshAuditAppend { .. }
+            | ServerRequest::DshAuditArtifact { .. }
             | ServerRequest::DshAuditCursor { .. }
             | ServerRequest::DynamicToolCall { .. }
             | ServerRequest::AttestationGenerate { .. }
@@ -889,6 +891,35 @@ mod tests {
                 "_meta": { "source": "tui" }
             })
         );
+    }
+
+    #[test]
+    fn rejects_dsh_audit_artifact_without_recording_pending_approval() {
+        let mut pending = PendingAppServerRequests::default();
+        let thread_id = codex_protocol::ThreadId::new();
+        let request = ServerRequest::DshAuditArtifact {
+            request_id: AppServerRequestId::Integer(101),
+            params: codex_app_server_protocol::DshAuditArtifactParams {
+                thread_id: thread_id.to_string(),
+                sha256: "0".repeat(64),
+                bytes: 3,
+                media_type: "application/json".to_string(),
+                offset: 0,
+                data: "e30K".to_string(),
+            },
+        };
+        assert_eq!(
+            super::super::app_server_event_targets::server_request_thread_id(&request),
+            Some(thread_id)
+        );
+        assert_eq!(
+            pending.note_server_request(&request),
+            Some(UnsupportedAppServerRequest {
+                request_id: AppServerRequestId::Integer(101),
+                message: "DSH audit requests are not available in TUI.".to_string(),
+            })
+        );
+        assert!(!pending.contains_server_request(&request));
     }
 
     #[test]

@@ -2049,7 +2049,8 @@ async fn handle_server_request(
             .await
         }
         ServerRequest::DshAuditAppend { request_id, .. }
-        | ServerRequest::DshAuditCursor { request_id, .. } => {
+        | ServerRequest::DshAuditCursor { request_id, .. }
+        | ServerRequest::DshAuditArtifact { request_id, .. } => {
             reject_server_request(
                 client,
                 request_id,

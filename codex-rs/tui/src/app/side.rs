@@ -100,6 +100,7 @@ impl SideParentStatus {
             | ServerRequest::ApplyPatchApproval { .. }
             | ServerRequest::ExecCommandApproval { .. } => Some(SideParentStatus::NeedsApproval),
             ServerRequest::DshAuditAppend { .. }
+            | ServerRequest::DshAuditArtifact { .. }
             | ServerRequest::DshAuditCursor { .. }
             | ServerRequest::DynamicToolCall { .. }
             | ServerRequest::AttestationGenerate { .. }

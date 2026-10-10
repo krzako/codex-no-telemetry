@@ -49,6 +49,7 @@ impl ChatWidget {
                 self.on_request_user_input(params);
             }
             ServerRequest::DshAuditAppend { .. }
+            | ServerRequest::DshAuditArtifact { .. }
             | ServerRequest::DshAuditCursor { .. }
             | ServerRequest::DynamicToolCall { .. }
             | ServerRequest::AttestationGenerate { .. }

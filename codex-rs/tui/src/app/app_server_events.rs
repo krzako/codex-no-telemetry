@@ -565,6 +565,7 @@ impl App {
         let unsupported_request = matches!(
             &request,
             ServerRequest::DshAuditAppend { .. }
+                | ServerRequest::DshAuditArtifact { .. }
                 | ServerRequest::DshAuditCursor { .. }
                 | ServerRequest::DynamicToolCall { .. }
                 | ServerRequest::AttestationGenerate { .. }
