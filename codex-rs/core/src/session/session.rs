@@ -1871,13 +1871,7 @@ impl Session {
             // record_initial_history can emit events. We record only after the SessionConfiguredEvent is emitted.
             Box::pin(sess.record_initial_history(initial_history)).await;
             if let Some(snapshot) = dsh_import_snapshot {
-                let has_prior_user_turns = snapshot
-                    .effective_history
-                    .iter()
-                    .any(|item| crate::context_manager::is_user_turn_boundary(&item.item));
-                let mut state = sess.state.lock().await;
-                state.history.install_dsh_snapshot(snapshot)?;
-                state.set_next_turn_is_first(!has_prior_user_turns);
+                sess.install_dsh_context(snapshot).await?;
             }
             if restore_child_window {
                 sess.state.lock().await.restore_auto_compact_window(
