@@ -1836,3 +1836,44 @@ async fn resume_candidate_matches_cwd_reads_latest_turn_context() -> std::io::Re
     );
     Ok(())
 }
+
+#[tokio::test]
+async fn load_rollout_items_preserves_dsh_import_seed_without_compaction() -> std::io::Result<()> {
+    let home = TempDir::new().expect("temp dir");
+    let path = home.path().join("rollout.jsonl");
+    let thread_id = ThreadId::new();
+    let snapshot = codex_history::ImportedContextV1 {
+        effective_history: vec![],
+        retained_context: codex_history::RetainedContext::default(),
+        history_version: 17,
+    };
+    let seed = RolloutItem::DshImportedContextV1(Box::new(snapshot.clone()));
+    for mode in [ThreadHistoryMode::Legacy, ThreadHistoryMode::Paginated] {
+        assert!(crate::is_persisted_rollout_item(&seed, mode));
+    }
+    let mut file = File::create(&path)?;
+    for (ordinal, item) in [paginated_session_meta_item(thread_id, home.path()), seed]
+        .into_iter()
+        .enumerate()
+    {
+        let line = RolloutLine {
+            timestamp: "2026-10-13T00:00:00Z".to_string(),
+            ordinal: Some(ordinal as u64),
+            item,
+        };
+        writeln!(
+            file,
+            "{}",
+            serde_json::to_string(&line).map_err(std::io::Error::other)?
+        )?;
+    }
+    file.sync_all()?;
+    drop(file);
+    let (items, loaded_id, errors) = RolloutRecorder::load_rollout_items(&path).await?;
+    assert_eq!((loaded_id, errors, items.len()), (Some(thread_id), 0, 2));
+    let RolloutItem::DshImportedContextV1(loaded) = &items[1] else {
+        panic!("missing imported context")
+    };
+    assert_eq!(loaded.as_ref(), &snapshot);
+    Ok(())
+}

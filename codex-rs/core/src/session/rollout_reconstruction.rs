@@ -11,6 +11,7 @@ use uuid::Uuid;
 #[derive(Debug)]
 pub(super) struct RolloutReconstruction {
     pub(super) history: Vec<ResponseItemEnvelope>,
+    pub(super) imported_history_version: Option<u64>,
     pub(super) retained_context: codex_history::RetainedContext,
     pub(super) guardian_history: Option<codex_history::GuardianHistoryCheckpoint>,
     pub(super) previous_turn_settings: Option<PreviousTurnSettings>,
@@ -303,6 +304,7 @@ impl Session {
                 | RolloutItem::SessionMeta(_)
                 | RolloutItem::RealtimeItem(_)
                 | RolloutItem::RetainedContext(_)
+                | RolloutItem::DshImportedContextV1(_)
                 | RolloutItem::SecurityRiskScore(_)
                 | RolloutItem::TokenUsageRecord(_)
                 | RolloutItem::InterAgentCommunicationMetadata { .. } => {}
@@ -362,6 +364,9 @@ impl Session {
         let rollout_suffix = base_compaction.map_or(rollout_items, |checkpoint| checkpoint.suffix);
         for item in rollout_suffix {
             match item {
+                RolloutItem::DshImportedContextV1(snapshot) => {
+                    history.restore_imported_context(snapshot.as_ref().clone());
+                }
                 RolloutItem::RetainedContext(event) => {
                     history.record_retained_context(event);
                 }
@@ -463,6 +468,7 @@ impl Session {
                 | RolloutItem::RealtimeItem(_)
                 | RolloutItem::TokenUsageRecord(_)
                 | RolloutItem::RetainedContext(_)
+                | RolloutItem::DshImportedContextV1(_)
                 | RolloutItem::SecurityRiskScore(_)
                 | RolloutItem::EventMsg(_) => {
                     unreachable!("only world-state replay items are collected")
@@ -476,7 +482,16 @@ impl Session {
             previous_id: None,
             id: None,
         });
+        let imported_history_version = rollout_items
+            .iter()
+            .filter_map(|item| match item {
+                RolloutItem::DshImportedContextV1(snapshot) => Some(snapshot.history_version),
+                _ => None,
+            })
+            .max()
+            .map(|version| version.max(history.history_version()));
         RolloutReconstruction {
+            imported_history_version,
             retained_context: history.retained_context().clone(),
             guardian_history: history.guardian_history_checkpoint(),
             history: history.into_annotated_items(),

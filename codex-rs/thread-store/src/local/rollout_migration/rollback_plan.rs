@@ -110,6 +110,7 @@ pub(super) struct RollbackPlanner {
     retained_fact_sources: Vec<RetainedFactSource>,
     compactions: Vec<CompactionFrame>,
     model_replay: ModelReplayPlanner,
+    has_imported_context: bool,
 }
 
 impl RollbackPlanner {
@@ -128,6 +129,7 @@ impl RollbackPlanner {
             retained_fact_sources: Vec::new(),
             compactions: Vec::new(),
             model_replay: ModelReplayPlanner::new(),
+            has_imported_context: false,
         }
     }
 
@@ -189,6 +191,11 @@ impl RollbackPlanner {
                 }
             }
             RolloutItem::EventMsg(EventMsg::ThreadRolledBack(rollback)) => {
+                if self.has_imported_context {
+                    return Err(migration_error(
+                        "cannot migrate rollback after DSH context import to paginated history; retain legacy history",
+                    ));
+                }
                 self.apply_rollback(rollback.num_turns)?;
             }
             RolloutItem::EventMsg(EventMsg::TurnStarted(event)) => {
@@ -277,6 +284,10 @@ impl RollbackPlanner {
                     turn_id: answer.turn_id.clone(),
                     acceptance_order: *acceptance_order,
                 });
+            }
+            RolloutItem::DshImportedContextV1(_) => {
+                self.has_imported_context = true;
+                self.record_boundaries[index] = None;
             }
             RolloutItem::SecurityRiskScore(_) => self.record_boundaries[index] = None,
         }
@@ -539,3 +550,7 @@ fn user_response_matches_event(content: &[ContentItem], event: &UserMessageEvent
         && event.local_images.is_empty()
         && event.local_audio.is_empty()
 }
+
+#[cfg(test)]
+#[path = "rollback_plan_tests.rs"]
+mod tests;

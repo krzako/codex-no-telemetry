@@ -109,7 +109,10 @@ fn keep_forked_rollout_item(item: &RolloutItem, preserve_reference_context_item:
         RolloutItem::TurnContext(_) | RolloutItem::WorldState(_) => preserve_reference_context_item,
         // Child threads inherit model context, not the parent's cumulative usage state.
         RolloutItem::TokenUsageRecord(_) => false,
-        RolloutItem::Compacted(_) | RolloutItem::EventMsg(_) | RolloutItem::SessionMeta(_) => true,
+        RolloutItem::DshImportedContextV1(_)
+        | RolloutItem::Compacted(_)
+        | RolloutItem::EventMsg(_)
+        | RolloutItem::SessionMeta(_) => true,
     }
 }
 
@@ -1058,6 +1061,22 @@ impl LocalAgentControl {
             match item {
                 RolloutItem::ResponseItem(response_item) => {
                     retain_forked_item(response_item, &mut replaced_parent_developer_instructions)
+                }
+                RolloutItem::DshImportedContextV1(snapshot) => {
+                    snapshot.retained_context = codex_history::RetainedContext::default();
+                    if !(context_mode == GuardianContextMode::ThreadOwned
+                        && multi_agent_version == MultiAgentVersion::V2)
+                    {
+                        snapshot.retained_context.mark_user_messages_incomplete();
+                    }
+                    replaced_parent_developer_instructions = false;
+                    snapshot.effective_history.retain_mut(|response_item| {
+                        retain_forked_item(
+                            response_item,
+                            &mut replaced_parent_developer_instructions,
+                        )
+                    });
+                    true
                 }
                 RolloutItem::Compacted(compacted) => {
                     // This checkpoint belongs to the inherited parent prefix.

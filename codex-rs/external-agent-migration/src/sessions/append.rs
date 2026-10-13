@@ -242,6 +242,7 @@ fn source_model_items(items: &[RolloutItem]) -> Option<Vec<SourceModelItem<'_>>>
                 EventMsg::ContextCompacted(_) | EventMsg::ThreadRolledBack(_),
             )
             | RolloutItem::InterAgentCommunication(_)
+            | RolloutItem::DshImportedContextV1(_)
             | RolloutItem::Compacted(_)
             | RolloutItem::TurnContext(_)
             | RolloutItem::RetainedContext(_)
@@ -268,6 +269,7 @@ fn history_model_items(items: &[RolloutItem]) -> Option<Vec<&ResponseItem>> {
                 EventMsg::ContextCompacted(_) | EventMsg::ThreadRolledBack(_),
             )
             | RolloutItem::InterAgentCommunication(_)
+            | RolloutItem::DshImportedContextV1(_)
             | RolloutItem::Compacted(_)
             | RolloutItem::TurnContext(_)
             | RolloutItem::WorldState(_) => return None,

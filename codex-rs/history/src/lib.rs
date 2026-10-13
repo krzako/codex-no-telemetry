@@ -39,7 +39,7 @@ use serde::de::Error as _;
 /// A model-history item with room for history-only metadata.
 ///
 /// Persistence keeps the response item intact and stores its metadata separately.
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema)]
 pub struct ResponseItemEnvelope {
     pub item: ResponseItem,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -139,6 +139,8 @@ pub enum RolloutItem {
         trigger_turn: bool,
     },
     Compacted(CompactedItem),
+    /// Exact imported model context; this is not a model execution or compaction.
+    DshImportedContextV1(Box<ImportedContextV1>),
     TurnContext(TurnContextItem),
     TokenUsageRecord(TokenUsageRecord),
     WorldState(WorldStateItem),
@@ -197,7 +199,9 @@ pub use retained_context::RetainedInputSource;
 pub use retained_context::RetainedUserMessage;
 pub use retained_context::VerifiedAnswer;
 pub use retained_context::VerifiedQuestionAnswer;
+mod imported_context;
 mod rollout_payload;
+pub use imported_context::ImportedContextV1;
 
 pub use guardian_history::GuardianHistoryCheckpoint;
 
@@ -520,6 +524,7 @@ fn multi_agent_version_from_items(
             | RolloutItem::TokenUsageRecord(_)
             | RolloutItem::WorldState(_)
             | RolloutItem::RetainedContext(_)
+            | RolloutItem::DshImportedContextV1(_)
             | RolloutItem::SecurityRiskScore(_)
             | RolloutItem::RealtimeItem(_)
             | RolloutItem::EventMsg(_) => None,

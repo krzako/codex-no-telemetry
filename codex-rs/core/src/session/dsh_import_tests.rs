@@ -53,3 +53,72 @@ async fn imported_context_does_not_reinject_unchanged_environment() {
         .unwrap();
     assert_eq!(session.clone_history().await.annotated_items(), history);
 }
+
+#[tokio::test]
+async fn durable_import_seed_replaces_provenance_and_preserves_later_items() {
+    use codex_history::CodexHarnessMetadata;
+    use codex_history::ImportedContextV1;
+    use codex_protocol::models::ContentItem;
+    use codex_protocol::models::ResponseItem;
+
+    let message = |text: &str| {
+        ResponseItemEnvelope::new(ResponseItem::Message {
+            id: None,
+            role: "assistant".to_string(),
+            content: vec![ContentItem::OutputText {
+                text: text.to_string(),
+            }],
+            phase: None,
+            internal_chat_message_metadata_passthrough: None,
+        })
+    };
+    let (session, turn) = make_session_and_context().await;
+    let turn = Arc::new(turn);
+    let world = build_world_state_from_turn_context(&session, &turn).await;
+    let mut imported = message("exact imported context");
+    imported.metadata = Some(CodexHarnessMetadata {
+        history_truncation_token_limit: Some(100),
+        ..Default::default()
+    });
+    let mut imported_history: Vec<_> = world
+        .render_full()
+        .into_iter()
+        .map(ContextualUserFragment::into_boxed_response_item)
+        .map(ResponseItemEnvelope::new)
+        .collect();
+    imported_history.push(imported);
+    let after = message("new turn after import");
+    let mut retained_context = RetainedContext::default();
+    retained_context.mark_user_messages_incomplete();
+    let rollout = vec![
+        RolloutItem::ResponseItem(message("provenance outside active context")),
+        RolloutItem::WorldState(WorldStateItem::full(world.snapshot().into_object())),
+        RolloutItem::TurnContext(turn.to_turn_context_item()),
+        RolloutItem::DshImportedContextV1(Box::new(ImportedContextV1 {
+            effective_history: imported_history.clone(),
+            retained_context: retained_context.clone(),
+            history_version: 52,
+        })),
+        RolloutItem::ResponseItem(after.clone()),
+    ];
+    let durable: Vec<RolloutItem> =
+        serde_json::from_slice(&serde_json::to_vec(&rollout).unwrap()).unwrap();
+    session.apply_rollout_reconstruction(&turn, &durable).await;
+    let history = session.clone_history().await;
+    imported_history.push(after);
+    assert_eq!(history.annotated_items(), imported_history);
+    assert_eq!(history.retained_context(), &retained_context);
+    assert!(history.history_version() >= 52);
+    assert_eq!(
+        history.reference_context_item(),
+        Some(turn.to_turn_context_item())
+    );
+    session
+        .record_context_updates_and_set_reference_context_item(&StepContext::for_test(turn))
+        .await
+        .unwrap();
+    assert_eq!(
+        session.clone_history().await.annotated_items(),
+        history.annotated_items()
+    );
+}

@@ -51,6 +51,7 @@ pub(crate) fn serialize_tiered_input(
             | RolloutItem::TurnContext(_)
             | RolloutItem::RealtimeItem(_)
             | RolloutItem::WorldState(_)
+            | RolloutItem::DshImportedContextV1(_)
             | RolloutItem::SecurityRiskScore(_)
             | RolloutItem::TokenUsageRecord(_)
             | RolloutItem::RetainedContext(_)

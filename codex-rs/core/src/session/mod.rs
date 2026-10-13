@@ -1725,6 +1725,7 @@ impl Session {
     ) -> Option<PreviousTurnSettings> {
         let rollout_reconstruction::RolloutReconstruction {
             mut history,
+            imported_history_version,
             retained_context,
             guardian_history,
             previous_turn_settings,
@@ -1749,14 +1750,18 @@ impl Session {
         // Replay must not upload or migrate recorded history. The inline store returns prepared
         // inline bytes, while existing file references bypass preparation and remain unchanged.
         // Bound replay future size now that image preparation can await storage.
-        let _ = Box::pin(prepare_image_response_items(
-            &mut prepared_history,
-            ImagePreparationMode::DetailBased,
-            ImageResizeNoticeMode::Disabled,
-            &InlineAttachmentStore,
-        ))
-        .await;
-        prepare_audio_response_items(&mut prepared_history);
+        // An imported checkpoint already owns the exact active model items. Legacy media
+        // preparation can add metadata even to text-only items, changing that saved context.
+        if imported_history_version.is_none() {
+            let _ = Box::pin(prepare_image_response_items(
+                &mut prepared_history,
+                ImagePreparationMode::DetailBased,
+                ImageResizeNoticeMode::Disabled,
+                &InlineAttachmentStore,
+            ))
+            .await;
+            prepare_audio_response_items(&mut prepared_history);
+        }
         assert_eq!(
             prepared_history.len(),
             metadata.len(),
@@ -1782,6 +1787,9 @@ impl Session {
                 reference_context_item,
                 HistoryReplacement::Reset,
             );
+            if let Some(version) = imported_history_version {
+                state.history.restore_imported_history_version(version);
+            }
             state.history.restore_review_context(
                 Some(&retained_context),
                 guardian_history.as_ref(),

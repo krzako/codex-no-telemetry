@@ -36,6 +36,9 @@ pub(super) enum RolloutItemWire<'a> {
     InterAgentCommunicationMetadata {
         payload: InterAgentCommunicationMetadataPayload,
     },
+    DshImportedContextV1 {
+        payload: Cow<'a, crate::ImportedContextV1>,
+    },
     Compacted {
         payload: Cow<'a, CompactedItem>,
     },
@@ -82,6 +85,9 @@ impl<'a> From<&'a RolloutItem> for RolloutItemWire<'a> {
                     },
                 }
             }
+            RolloutItem::DshImportedContextV1(payload) => Self::DshImportedContextV1 {
+                payload: Cow::Borrowed(payload),
+            },
             RolloutItem::Compacted(payload) => Self::Compacted {
                 payload: Cow::Borrowed(payload),
             },
@@ -127,6 +133,9 @@ impl From<RolloutItemWire<'_>> for RolloutItem {
                 Self::InterAgentCommunicationMetadata {
                     trigger_turn: payload.trigger_turn,
                 }
+            }
+            RolloutItemWire::DshImportedContextV1 { payload } => {
+                Self::DshImportedContextV1(Box::new(payload.into_owned()))
             }
             RolloutItemWire::Compacted { payload } => Self::Compacted(payload.into_owned()),
             RolloutItemWire::TurnContext { payload } => Self::TurnContext(payload.into_owned()),

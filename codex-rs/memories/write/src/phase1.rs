@@ -412,6 +412,7 @@ mod job {
                 | RolloutItem::RealtimeItem(_)
                 | RolloutItem::WorldState(_)
                 | RolloutItem::RetainedContext(_)
+                | RolloutItem::DshImportedContextV1(_)
                 | RolloutItem::SecurityRiskScore(_)
                 | RolloutItem::EventMsg(_) => None,
             })

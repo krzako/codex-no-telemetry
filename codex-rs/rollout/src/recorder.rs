@@ -2181,6 +2181,7 @@ async fn resume_candidate_matches_cwd(
             | RolloutItem::RealtimeItem(_)
             | RolloutItem::TokenUsageRecord(_)
             | RolloutItem::RetainedContext(_)
+            | RolloutItem::DshImportedContextV1(_)
             | RolloutItem::SecurityRiskScore(_)
             | RolloutItem::EventMsg(_) => None,
         })
