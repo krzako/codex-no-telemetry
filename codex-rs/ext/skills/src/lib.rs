@@ -26,6 +26,7 @@ mod warnings;
 mod world_state;
 mod world_state_catalogs;
 
+pub use config::NativeSkillsDisabled;
 pub use config::SkillsExtensionConfig;
 pub use extension::install;
 pub use extension::install_with_providers;

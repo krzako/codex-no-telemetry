@@ -14,3 +14,8 @@ pub struct SkillsExtensionConfig {
     /// Whether cheap skill selectors run in shadow mode without changing prompt contents.
     pub shadow_selection_enabled: bool,
 }
+
+/// Host-owned thread policy disabling native skill discovery, prompts and tools.
+/// Install before thread startup; configuration refreshes cannot re-enable skills.
+#[derive(Clone, Copy, Debug)]
+pub struct NativeSkillsDisabled;

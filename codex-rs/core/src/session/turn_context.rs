@@ -1221,6 +1221,11 @@ impl Session {
             per_turn_config.codex_home.as_path(),
         );
         let skills_snapshot = if matches!(build_mode, TurnContextBuildMode::InjectItems)
+            || self
+                .services
+                .thread_extension_data
+                .get::<codex_skills_extension::NativeSkillsDisabled>()
+                .is_some()
             || (per_turn_config
                 .features
                 .enabled(Feature::SkipHostSkillDiscovery)

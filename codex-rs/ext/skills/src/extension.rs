@@ -141,6 +141,13 @@ where
 {
     fn on_thread_start<'a>(&'a self, input: ThreadStartInput<'a, C>) -> ExtensionFuture<'a, ()> {
         Box::pin(async move {
+            if input
+                .thread_store
+                .get::<crate::NativeSkillsDisabled>()
+                .is_some()
+            {
+                return;
+            }
             input.session_store.insert(SkillsSessionState {
                 mcp_resources: input.mcp_resource_client.clone(),
                 extension_metrics: input.extension_metrics.clone(),
@@ -168,6 +175,9 @@ where
         _previous_config: &C,
         new_config: &C,
     ) {
+        if thread_store.get::<crate::NativeSkillsDisabled>().is_some() {
+            return;
+        }
         let next_config = (self.config_from_host)(new_config);
         if let Some(state) = thread_store.get::<SkillsThreadState>() {
             state.set_config(next_config);

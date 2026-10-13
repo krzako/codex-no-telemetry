@@ -1476,7 +1476,7 @@ impl ThreadRequestProcessor {
             (!config.ephemeral && thread_store.supports_paginated_history_lists())
                 .then_some(ThreadHistoryMode::Paginated)
         });
-        let mut thread_extension_init = ExtensionDataInit::new();
+        let mut thread_extension_init = native_skills_policy(app_server_client_name.as_deref());
         if !selected_capability_roots.is_empty() {
             thread_extension_init.insert(selected_capability_roots);
         }
@@ -2272,12 +2272,13 @@ impl ThreadRequestProcessor {
             ..
         } = self
             .thread_manager
-            .resume_thread_with_history(
+            .resume_thread_with_extension_init(
                 config,
                 thread_history,
                 self.auth_manager.clone(),
                 self.request_trace_context(request_id).await,
                 client_mcp_extensions,
+                native_skills_policy(app_server_client_name.as_deref()),
             )
             .await
             .map_err(|err| internal_error(format!("error reloading thread after revert: {err}")))?;
@@ -3935,7 +3936,7 @@ impl ThreadRequestProcessor {
 
         match self
             .thread_manager
-            .resume_thread_with_history(
+            .resume_thread_with_extension_init(
                 config,
                 thread_history,
                 self.auth_manager.clone(),
@@ -3946,6 +3947,7 @@ impl ThreadRequestProcessor {
                     ThreadResumeTarget::DaemonRecovery(_) => None,
                 },
                 client_mcp_extensions,
+                native_skills_policy(app_server_client_name.as_deref()),
             )
             .await
         {
@@ -5139,6 +5141,7 @@ impl ThreadRequestProcessor {
         };
 
         let fork_options = StartThreadOptions {
+            thread_extension_init: native_skills_policy(app_server_client_name.as_deref()),
             thread_source,
             parent_trace,
             client_mcp_extensions,
@@ -6321,3 +6324,12 @@ fn build_thread_from_loaded_snapshot(
 #[cfg(test)]
 #[path = "thread_processor_tests.rs"]
 mod thread_processor_tests;
+
+/// DSH owns capability discovery; install this policy before session startup or resume.
+fn native_skills_policy(client_name: Option<&str>) -> ExtensionDataInit {
+    let mut init = ExtensionDataInit::new();
+    if client_name == Some("deepseek-harness") {
+        init.insert(codex_skills_extension::NativeSkillsDisabled);
+    }
+    init
+}

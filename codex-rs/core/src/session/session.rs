@@ -615,7 +615,14 @@ async fn warm_plugins_and_skills_for_session_init(
     skills_service: Arc<HostSkillsService>,
     turn_environments: &TurnEnvironmentSnapshot,
     extensions: &codex_extension_api::ExtensionRegistry<Config>,
+    thread_store: &codex_extension_api::ExtensionData,
 ) -> Vec<SkillError> {
+    if thread_store
+        .get::<codex_skills_extension::NativeSkillsDisabled>()
+        .is_some()
+    {
+        return Vec::new();
+    }
     let plugins_input = config.plugins_config_input();
     let plugin_outcome = plugins_manager.plugins_for_config(&plugins_input).await;
     if config.features.enabled(Feature::SkipHostSkillDiscovery)
@@ -1420,6 +1427,7 @@ impl Session {
                 Arc::clone(&skills_service),
                 &resolved_environments,
                 extensions.as_ref(),
+                &thread_extension_data,
             )
             .instrument(info_span!(
                 "session_init.plugin_skill_warmup",
