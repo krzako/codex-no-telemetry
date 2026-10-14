@@ -878,9 +878,12 @@ impl Session {
         if cleared_active_turn {
             self.emit_thread_idle_lifecycle_if_idle(idle_cause).await;
         }
-        // Private reviewers already flushed the terminal event before delivering it.
+        // Private reviewers and DSH turns flushed the terminal event before delivering it.
         // Other buffering writers still need a barrier for the terminal event.
-        if !saved_guardian_completion && let Err(err) = self.flush_rollout().await {
+        if !saved_guardian_completion
+            && turn_context.dsh_audit_binding().is_none()
+            && let Err(err) = self.flush_rollout().await
+        {
             warn!("failed to flush rollout after emitting terminal turn event: {err}");
         }
         if cleared_active_turn {
@@ -1015,7 +1018,9 @@ impl Session {
         self.send_event(task.turn_context.as_ref(), event).await;
         // Regular items were flushed before this terminal event was appended; buffering
         // thread writers may not flush it without another explicit barrier.
-        if let Err(err) = self.flush_rollout().await {
+        if task.turn_context.dsh_audit_binding().is_none()
+            && let Err(err) = self.flush_rollout().await
+        {
             warn!("failed to flush rollout after emitting terminal turn event: {err}");
         }
     }

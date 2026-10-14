@@ -78,6 +78,10 @@ impl DshAuditBinding {
         self.context_config.as_ref()
     }
 
+    pub(crate) fn fail(&self) {
+        self.failed.store(true, Ordering::Release);
+    }
+
     /// Await the host's durable acknowledgment before dependent work proceeds.
     pub async fn append(&self, fact: Value) -> Result<()> {
         let _guard = self.append_gate.lock().await;
@@ -207,11 +211,15 @@ impl DshModelAttempt {
 #[derive(Debug, Default)]
 pub struct DshAuditBindingRegistry {
     pending: Mutex<HashMap<u64, Arc<DshAuditBinding>>>,
+    failed: AtomicBool,
 }
 
 impl DshAuditBindingRegistry {
     pub fn insert(&self, binding: DshAuditBinding) -> Result<()> {
         let mut pending = self.pending.lock().unwrap_or_else(PoisonError::into_inner);
+        if self.failed.load(Ordering::Acquire) {
+            anyhow::bail!("DSH thread persistence failed; further turns are blocked");
+        }
         if pending.contains_key(&binding.turn) {
             anyhow::bail!("DSH audit binding already exists for turn {}", binding.turn);
         }
@@ -225,6 +233,14 @@ impl DshAuditBindingRegistry {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .remove(&turn)
+    }
+
+    pub(crate) fn fail(&self) {
+        let mut pending = self.pending.lock().unwrap_or_else(PoisonError::into_inner);
+        self.failed.store(true, Ordering::Release);
+        for binding in pending.drain().map(|(_, binding)| binding) {
+            binding.fail();
+        }
     }
 }
 

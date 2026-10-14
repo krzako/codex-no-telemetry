@@ -229,6 +229,7 @@ mod code_mode_warning;
 pub(crate) mod context_window;
 mod daemon_recovery;
 mod dsh_import;
+mod dsh_terminal;
 mod environment;
 mod extension_interruption;
 pub(crate) mod extension_metrics;
@@ -2358,7 +2359,13 @@ impl Session {
     }
 
     /// Persist the event to rollout and send it to clients.
-    pub(crate) async fn send_event(&self, turn_context: &TurnContext, msg: EventMsg) {
+    pub(crate) async fn send_event(&self, turn_context: &TurnContext, mut msg: EventMsg) {
+        let dsh_terminal = turn_context.dsh_audit_binding().is_some()
+            && matches!(msg, EventMsg::TurnComplete(_) | EventMsg::TurnAborted(_));
+        if dsh_terminal {
+            self.persist_dsh_terminal_event(turn_context, &mut msg)
+                .await;
+        }
         let legacy_source = msg.clone();
         if let EventMsg::Error(error) = &legacy_source
             && error
@@ -2400,7 +2407,8 @@ impl Session {
                 .analytics_events_client
                 .track_guardian_session_event(self.thread_id, &event);
         }
-        self.send_event_raw(event).await;
+        self.send_event_raw_with_persistence(event, !dsh_terminal)
+            .await;
         self.maybe_notify_parent_of_terminal_turn(turn_context, &legacy_source)
             .await;
         self.maybe_mirror_event_text_to_realtime(&legacy_source)
