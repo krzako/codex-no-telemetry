@@ -10,7 +10,6 @@ use codex_extension_api::ExtensionRegistryBuilder;
 use codex_features::Feature;
 use codex_image_generation_extension::install as install_image_generation_extension;
 use codex_login::CodexAuth;
-use codex_login::auth::BedrockApiKeyAuth;
 use codex_mcp::CODEX_APPS_MCP_SERVER_NAME;
 use codex_protocol::config_types::WebSearchMode;
 use codex_protocol::models::ImageDetail;
@@ -20,7 +19,6 @@ use codex_protocol::openai_models::ToolMode;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::Op;
 use codex_protocol::user_input::UserInput;
-use codex_web_search_extension::install as install_web_search_extension;
 use core_test_support::apps_test_server::AppsTestServer;
 use core_test_support::apps_test_server::SEARCH_CALENDAR_CREATE_TOOL;
 use core_test_support::apps_test_server::SEARCH_CALENDAR_NAMESPACE;
@@ -38,7 +36,6 @@ const RESPONSES_LITE_HEADER: &str = "x-openai-internal-codex-responses-lite";
 fn responses_extensions(auth: &CodexAuth) -> Arc<ExtensionRegistry<Config>> {
     let auth_manager = codex_core::test_support::auth_manager_from_auth(auth.clone());
     let mut extension_builder = ExtensionRegistryBuilder::<Config>::new();
-    install_web_search_extension(&mut extension_builder, Arc::clone(&auth_manager));
     install_image_generation_extension(&mut extension_builder, auth_manager, |config| {
         Some(config.codex_home.clone())
     });
@@ -325,7 +322,7 @@ async fn responses_lite_prepares_images() -> Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn responses_lite_uses_standalone_web_search_and_image_generation() -> Result<()> {
+async fn responses_lite_uses_standalone_image_generation() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
     let server = responses::start_mock_server().await;
@@ -361,16 +358,14 @@ async fn responses_lite_uses_standalone_web_search_and_image_generation() -> Res
     let body = request.body_json();
     assert!(body.get("tools").is_none());
     let tools = additional_tools(&body)?;
-    assert!(has_namespaced_tool(tools, "web", "run"));
     assert!(has_namespaced_tool(tools, "image_gen", "imagegen"));
-    assert!(!has_hosted_tool(tools, "web_search"));
     assert!(!has_hosted_tool(tools, "image_generation"));
 
     Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn responses_lite_exposes_standalone_tools_for_actor_authorized_provider() -> Result<()> {
+async fn responses_lite_exposes_image_generation_for_actor_authorized_provider() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
     let server = responses::start_mock_server().await;
@@ -407,142 +402,7 @@ async fn responses_lite_exposes_standalone_tools_for_actor_authorized_provider()
 
     let body = response_mock.single_request().body_json();
     let tools = additional_tools(&body)?;
-    assert!(has_namespaced_tool(tools, "web", "run"));
     assert!(has_namespaced_tool(tools, "image_gen", "imagegen"));
-
-    Ok(())
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn responses_lite_exposes_standalone_web_search_for_opted_in_custom_provider() -> Result<()> {
-    assert_responses_lite_custom_provider_web_search(
-        WebSearchMode::Live,
-        /*supports_standalone_web_search*/ true,
-        /*expect_web_run*/ true,
-    )
-    .await
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn responses_lite_does_not_expose_standalone_web_search_for_custom_provider_by_default()
--> Result<()> {
-    assert_responses_lite_custom_provider_web_search(
-        WebSearchMode::Live,
-        /*supports_standalone_web_search*/ false,
-        /*expect_web_run*/ false,
-    )
-    .await
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn responses_lite_does_not_expose_disabled_standalone_web_search_for_opted_in_provider()
--> Result<()> {
-    assert_responses_lite_custom_provider_web_search(
-        WebSearchMode::Disabled,
-        /*supports_standalone_web_search*/ true,
-        /*expect_web_run*/ false,
-    )
-    .await
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn responses_lite_does_not_expose_standalone_web_search_for_bedrock_provider() -> Result<()> {
-    skip_if_no_network!(Ok(()));
-
-    let server = responses::start_mock_server().await;
-    let response_mock = responses::mount_sse_once(
-        &server,
-        responses::sse(vec![
-            responses::ev_response_created("resp-1"),
-            responses::ev_completed("resp-1"),
-        ]),
-    )
-    .await;
-
-    let auth = CodexAuth::BedrockApiKey(BedrockApiKeyAuth {
-        api_key: "dummy".to_string(),
-        region: "us-east-1".to_string(),
-    });
-    let extensions = responses_extensions(&auth);
-    let mut builder = test_codex()
-        .with_auth(auth)
-        .with_extensions(extensions)
-        .with_model_info_override("gpt-5.4", |model_info| {
-            model_info.use_responses_lite = true;
-        })
-        .with_config(|config| {
-            configure_responses_tools(config);
-            config.model_provider.name = "Amazon Bedrock".to_string();
-            config.model_provider.requires_openai_auth = false;
-            config.model_provider.http_headers = None;
-            config.model_provider.supports_standalone_web_search = false;
-        });
-    let test = builder.build(&server).await?;
-
-    test.submit_turn("Use standalone web search").await?;
-
-    let request = response_mock.single_request();
-    assert_eq!(
-        request.header(RESPONSES_LITE_HEADER).as_deref(),
-        Some("true")
-    );
-    let body = request.body_json();
-    assert!(body.get("tools").is_none());
-    assert!(!request.has_content_kinds(&["model.base_instructions"]));
-    let tools = additional_tools(&body)?;
-    assert!(!has_namespaced_tool(tools, "web", "run"));
-    assert!(!has_hosted_tool(tools, "web_search"));
-
-    Ok(())
-}
-
-async fn assert_responses_lite_custom_provider_web_search(
-    web_search_mode: WebSearchMode,
-    supports_standalone_web_search: bool,
-    expect_web_run: bool,
-) -> Result<()> {
-    skip_if_no_network!(Ok(()));
-
-    let server = responses::start_mock_server().await;
-    let response_mock = responses::mount_sse_once(
-        &server,
-        responses::sse(vec![
-            responses::ev_response_created("resp-1"),
-            responses::ev_completed("resp-1"),
-        ]),
-    )
-    .await;
-
-    let auth = CodexAuth::from_api_key("dummy");
-    let extensions = responses_extensions(&auth);
-    let mut builder = test_codex()
-        .with_auth(auth)
-        .with_extensions(extensions)
-        .with_model_info_override("gpt-5.4", |model_info| {
-            model_info.use_responses_lite = true;
-        })
-        .with_config(move |config| {
-            configure_responses_tools(config);
-            assert!(config.web_search_mode.set(web_search_mode).is_ok());
-            config.model_provider.name = "custom-responses".to_string();
-            config.model_provider.requires_openai_auth = false;
-            config.model_provider.http_headers = None;
-            config.model_provider.supports_standalone_web_search = supports_standalone_web_search;
-        });
-    let test = builder.build(&server).await?;
-
-    test.submit_turn("Use standalone web search").await?;
-
-    let request = response_mock.single_request();
-    assert_eq!(
-        request.header(RESPONSES_LITE_HEADER).as_deref(),
-        Some("true")
-    );
-    let body = request.body_json();
-    assert!(body.get("tools").is_none());
-    let tools = additional_tools(&body)?;
-    assert_eq!(has_namespaced_tool(tools, "web", "run"), expect_web_run);
-    assert!(!has_hosted_tool(tools, "web_search"));
 
     Ok(())
 }
@@ -641,7 +501,6 @@ async fn responses_lite_omits_hosted_tools_without_standalone_extensions() -> Re
     let body = response_mock.single_request().body_json();
     assert!(body.get("tools").is_none());
     let tools = additional_tools(&body)?;
-    assert!(!has_hosted_tool(tools, "web_search"));
     assert!(!has_hosted_tool(tools, "image_generation"));
 
     Ok(())

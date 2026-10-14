@@ -2239,7 +2239,6 @@ dependencies = [
  "codex-utils-json-to-toml",
  "codex-utils-path-uri",
  "codex-utils-pty",
- "codex-web-search-extension",
  "codex-windows-sandbox",
  "core_test_support",
  "flate2",
@@ -3053,7 +3052,6 @@ dependencies = [
  "codex-utils-redacted-string",
  "codex-utils-stream-parser",
  "codex-utils-string",
- "codex-web-search-extension",
  "codex-windows-sandbox",
  "core_test_support",
  "ctor 0.6.3",
@@ -5225,27 +5223,6 @@ dependencies = [
  "tempfile",
  "tokio",
  "webrtc",
-]
-
-[[package]]
-name = "codex-web-search-extension"
-version = "0.0.0"
-dependencies = [
- "codex-api",
- "codex-core",
- "codex-extension-api",
- "codex-extension-items",
- "codex-login",
- "codex-model-provider",
- "codex-model-provider-info",
- "codex-otel",
- "codex-protocol",
- "codex-tools",
- "http 1.4.0",
- "pretty_assertions",
- "schemars 0.8.22",
- "serde_json",
- "url",
 ]
 
 [[package]]
