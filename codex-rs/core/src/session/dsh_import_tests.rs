@@ -15,7 +15,7 @@ use std::sync::Arc;
 
 #[tokio::test]
 async fn imported_context_does_not_reinject_unchanged_environment() {
-    let (session, turn) = make_session_and_context().await;
+    let (mut session, turn) = make_session_and_context().await;
     let turn = Arc::new(turn);
     let world = build_world_state_from_turn_context(&session, &turn).await;
     let history: Vec<ResponseItemEnvelope> = world
@@ -46,12 +46,55 @@ async fn imported_context_does_not_reinject_unchanged_environment() {
     }
     .into_portable_snapshot(json!({"schemaVersion": 1, "fork": {"revision": "test"}}))
     .unwrap();
+    let serialized = serde_json::to_value(&snapshot).unwrap();
+    let duplicate = serde_json::from_value(serialized.clone()).unwrap();
+    let missing_store = session.install_dsh_context(duplicate).await.unwrap_err();
+    assert!(
+        missing_store
+            .to_string()
+            .contains("Session persistence is disabled")
+    );
+    assert!(session.clone_history().await.annotated_items().is_empty());
+    let path = crate::session::tests::open_thread_persistence(&mut session).await;
     session.install_dsh_context(snapshot).await.unwrap();
+    let (stored, _, parse_errors) = codex_rollout::RolloutRecorder::load_rollout_items(&path)
+        .await
+        .unwrap();
+    assert_eq!(parse_errors, 0);
+    let seed = stored.iter().find_map(|item| match item {
+        RolloutItem::DshImportedContextV1(seed) => Some(seed.as_ref()),
+        _ => None,
+    });
+    assert_eq!(
+        seed,
+        Some(&codex_history::ImportedContextV1 {
+            effective_history: history.clone(),
+            retained_context: RetainedContext::default(),
+            history_version: 4,
+        })
+    );
     session
         .record_context_updates_and_set_reference_context_item(&StepContext::for_test(turn))
         .await
         .unwrap();
     assert_eq!(session.clone_history().await.annotated_items(), history);
+    let (mut failed_session, _) = make_session_and_context().await;
+    crate::session::tests::open_thread_persistence(&mut failed_session).await;
+    failed_session
+        .live_thread()
+        .unwrap()
+        .shutdown()
+        .await
+        .unwrap();
+    let error = failed_session
+        .install_dsh_context(serde_json::from_value(serialized).unwrap())
+        .await
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("failed to append DSH checkpoint")
+    );
 }
 
 #[tokio::test]
