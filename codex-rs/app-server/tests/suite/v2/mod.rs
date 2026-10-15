@@ -117,6 +117,8 @@ mod server_diagnostics;
 mod session_end;
 mod skills_list;
 mod sleep;
+#[path = "sqlite_fixture_isolation_tests.rs"]
+mod sqlite_fixture_isolation;
 mod thread_archive;
 mod thread_attachments;
 mod thread_delete;

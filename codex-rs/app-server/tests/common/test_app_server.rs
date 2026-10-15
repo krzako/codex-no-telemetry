@@ -264,6 +264,9 @@ impl TestAppServer {
         cmd.stderr(Stdio::piped());
         cmd.current_dir(codex_home);
         cmd.env("CODEX_HOME", codex_home);
+        // A temporary CODEX_HOME must not share the host's SQLite databases.
+        // Explicit fixture overrides below can still select another test directory.
+        cmd.env_remove("CODEX_SQLITE_HOME");
         cmd.env("RUST_LOG", "warn");
         // Keep integration tests isolated from host managed configuration.
         cmd.env(
